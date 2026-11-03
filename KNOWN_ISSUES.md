@@ -11,7 +11,7 @@
   desktop browser.
 - Tested on real hardware: an Xteink X4 Pro and an Xteink X3, one BookOrbit
   server, a short period. Delivery to BookOrbit worked on both. Other models
-  (X4, X4 Classic) are untested. Several details below were worked out by
+  (X4 and others) are untested. The X4C has no clock chip and is not supported. Several details below were worked out by
   reading CrossPoint's source and have **not** been confirmed on hardware.
 - Not tested: other readers or firmware builds, Plugin Hub installs and updates,
   very long sessions, and many books over a long time.
@@ -29,8 +29,8 @@ totals, streaks and time-of-day achievements.
 |---|---|---|
 | Xteink X3 | ESP32-C3 | Correct times (tested) |
 | Xteink X4 Pro | ESP32-S3 | Sessions stamped ahead of real time (tested) |
-| Xteink X4 Classic (X4C) | ESP32-S3 | Not tested. Same board and build family as the X4 Pro, so it may be affected |
-| Xteink X4 | ESP32-C3 | Not tested. Same chip family as the X3, so it may be fine |
+| Xteink X4C | reported as ESP32-C3 rev4 by its owner | No clock chip (no Clock option in Settings). Not supported, see issue 2 |
+| Xteink X4 | ESP32-C3 | Not tested. If it has no clock chip, see issue 2 |
 
 This is one person's testing on one unit of each model that was tested, so
 treat it as a clue, not a diagnosis. If you try another model, please say what
@@ -58,12 +58,23 @@ other time value it receives (`ts`) comes from the same clock.
 waiting can fix it by itself. Delete the affected sessions in BookOrbit with the
 trash icon in the Reading Log.
 
-## 2. Needs firmware with the `reader.session` event
+## 2. Needs a reader with a clock chip
+
+The firmware only records a reading session when it has a valid time. Readers
+with a battery-backed clock chip (the Xteink X3 and X4 Pro have one; you can tell
+because **Settings has a Clock option**) keep time while powered off. Readers
+without one, such as the Xteink X4C, have no Clock option and rely on internet
+time, which is lost at power-off. On those readers sessions may not be recorded
+at all, or may carry a stale time, so this plugin is **not supported** on them.
+This comes from reading the firmware source plus one owner's report that the X4C
+has no clock; it has not been tested end to end. Reports are welcome.
+
+## 3. Needs firmware with the `reader.session` event
 
 SD plugins and the `reader.session` event are not in a stable CrossPoint release
 at the time of writing. Older firmware ignores the event and nothing is sent.
 
-## 3. Delivery cannot be limited to the sync action
+## 4. Delivery cannot be limited to the sync action
 
 The firmware sends queued plugin events whenever the reader goes online: any WiFi
 join, starting the web interface, the KOReader sync action, and sleep if
@@ -71,7 +82,7 @@ join, starting the web interface, the KOReader sync action, and sleep if
 way to hold sessions back. That also means `events.jsonl` (the queue) is usually
 already empty by the time you look at it.
 
-## 4. Credentials on the SD card
+## 5. Credentials on the SD card
 
 `config.json` stores the md5 of your KOReader sync password. BookOrbit accepts
 that md5 as the key, so it works like a password for those endpoints, and it is
@@ -79,26 +90,26 @@ sent as a header on every request. Plugins cannot use the firmware's own
 protected credential storage, so it cannot be encrypted or obscured. Use a
 dedicated KOReader sync login, and https or a trusted network.
 
-## 5. Setup is through the web interface or a JSON file
+## 6. Setup is through the web interface or a JSON file
 
 There is no on-reader setup screen, because plugins cannot add text entry to the
 reader. A plugin also cannot add its own tab to the web interface's top bar; the
 settings card lives on the Plugins page.
 
-## 6. Book matching
+## 7. Book matching
 
 BookOrbit matches the book by its partial-MD5, so the file on the reader must be
 the same file BookOrbit has. If it is not, the server returns success but
 ignores the session, and you get no warning.
 
-## 7. Statistics based on pages
+## 8. Statistics based on pages
 
 Each session is sent as two points with `totalPages: 10000` (progress in basis
 points). Session time, streaks and progress percentages are derived from this
 and should be right. Any BookOrbit statistic that counts pages may use the raw
 10000 scale. This has not been checked in detail.
 
-## 8. Queue limits and updates
+## 9. Queue limits and updates
 
 - Each plugin's queue holds about 4 KB (roughly a dozen sessions); beyond that
   the oldest are dropped. Sync now and then.
@@ -109,12 +120,12 @@ and should be right. Any BookOrbit statistic that counts pages may use the raw
   (a manual copy of the repository folder), the firmware never queues events for
   it because the name is longer than 23 bytes. Rename it to `bookorbit-sync`.
 
-## 9. It relies on BookOrbit's KOReader plugin API
+## 10. It relies on BookOrbit's KOReader plugin API
 
 This uses the same endpoints as BookOrbit's own KOReader plugin. They are not a
 public, versioned API for third parties and could change.
 
-## 10. Small things not verified on hardware
+## 11. Small things not verified on hardware
 
 The "BookOrbit: session sent" popup, the sleep-time delivery path on current
 firmware, and the behaviour on devices without a battery-backed clock.
