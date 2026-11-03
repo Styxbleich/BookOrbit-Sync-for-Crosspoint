@@ -76,8 +76,9 @@ Prefer files? Copy `config.example.json` to `config.json` and fill it in.
   accepted and silently ignored by the server.
 - The progress scale is 10000 (basis points). Session time, streak and session
   progress should be exact; per-page statistics may use the raw scale.
-- BookOrbit lists the reader as its own device (the device name you chose).
-
+- The device name is an ID the plugin sends with each session, to keep readers
+  apart. It does not appear in BookOrbit's KOReader device list; that list comes
+  from KOSync position sync, where CrossPoint always reports itself as "CrossPoint".
 ## Known issues
 
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md). The most important one is a **firmware**
