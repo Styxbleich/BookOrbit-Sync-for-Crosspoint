@@ -377,3 +377,17 @@ test('highlights: check book reports a differing copy and an unknown file', asyn
   assert.match(await run({ matches: [], libraryVersion: 'v' }), /does not have this exact file/);
   assert.match(await run({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2, positionCompatible: false }], libraryVersion: 'v' }), /differs from its copy/);
 });
+
+test('highlights: BookOrbit answers POSTs with 201 Created, which counts as success', async () => {
+  const { els } = await load({
+    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS },
+    relay: async (m, u) => ({ status: 201, body: JSON.stringify(u.endsWith('/annotations')
+      ? { results: [{ hash: 'h', upserted: 1 }], unmatched: [] }
+      : { matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }], libraryVersion: 'v' }) })
+  });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
+  await els['bo-hl-send'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /^Sent\./);
+});

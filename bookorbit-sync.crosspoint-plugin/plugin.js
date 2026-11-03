@@ -432,7 +432,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       hlStatus('Asking BookOrbit...');
       if (!send) {
         const r = await postJson('match-check', Object.assign(deviceInfo(), { hashes: [hash] }));
-        if (r.status !== 200 || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
+        if (!(r.status >= 200 && r.status < 300) || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
         const match = (r.data.matches || [])[0];
         if (!match) return hlStatus('BookOrbit does not have this exact file (hash ' + hash + ').', true);
         if (match.positionCompatible === false) {
@@ -448,7 +448,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       const r = await postJson('annotations', Object.assign(deviceInfo(), {
         books: [{ hash, annotations: [annotation] }]
       }));
-      if (r.status !== 200 || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
+      if (!(r.status >= 200 && r.status < 300) || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
       if ((r.data.unmatched || []).length) {
         return hlStatus('BookOrbit does not have this exact file, so the highlight was not stored.', true);
       }
