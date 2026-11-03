@@ -9,8 +9,9 @@
 - Tested against: a mock BookOrbit built from the server's source, BookOrbit's
   own session-derivation code, fake-DOM tests of the settings page, and a
   desktop browser.
-- Tested on real hardware: one reader, one BookOrbit server, a short period.
-  Delivery to BookOrbit worked there. Several details below were worked out by
+- Tested on real hardware: an Xteink X4 Pro and an Xteink X3, one BookOrbit
+  server, a short period. Delivery to BookOrbit worked on both. Other models
+  (X4, X4 Classic) are untested. Several details below were worked out by
   reading CrossPoint's source and have **not** been confirmed on hardware.
 - Not tested: other readers or firmware builds, Plugin Hub installs and updates,
   very long sessions, and many books over a long time.
@@ -22,6 +23,19 @@ ahead of when you really read it ("last read: in 2 hours"), even though the
 reader's Settings, Clock screen shows the correct time. This affects daily
 totals, streaks and time-of-day achievements.
 
+**Which devices:**
+
+| Device | Chip | Result |
+|---|---|---|
+| Xteink X3 | ESP32-C3 | Correct times (tested) |
+| Xteink X4 Pro | ESP32-S3 | Sessions stamped ahead of real time (tested) |
+| Xteink X4 Classic (X4C) | ESP32-S3 | Not tested. Same board and build family as the X4 Pro, so it may be affected |
+| Xteink X4 | ESP32-C3 | Not tested. Same chip family as the X3, so it may be fine |
+
+This is one person's testing on one unit of each model that was tested, so
+treat it as a clue, not a diagnosis. If you try another model, please say what
+you saw, ideally in an issue on this repo.
+
 **Cause (suspected, not confirmed):** the plugin sends the firmware's
 `start_time`. The firmware takes it from a "trusted time" clock that never goes
 backward and is restored from flash on every boot, and the reader restarts
@@ -29,6 +43,12 @@ itself quietly after WiFi activity. If the saved value ever got ahead of real
 time, every restart puts the system clock ahead again, while the Clock screen
 keeps showing the correct hardware clock. Details and code references:
 [docs/FIRMWARE_CLOCK_ISSUE.md](docs/FIRMWARE_CLOCK_ISSUE.md).
+
+**Why the X3 may not show it:** the X3 behaves correctly with the same plugin
+and the same Plugin Hub install, so the plugin's own handling of times is not the
+cause. The X4 Pro and X3 differ in chip and board, and the saved clock value is
+stored per device, so it is either a bad saved value on that one unit or
+something specific to the S3 models. This has not been narrowed down.
 
 **What the plugin can do:** nothing. A plugin only receives the values the
 firmware chooses to provide, and the request template cannot do arithmetic. The
