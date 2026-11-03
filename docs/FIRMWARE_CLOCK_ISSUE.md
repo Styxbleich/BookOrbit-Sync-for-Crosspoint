@@ -2,24 +2,32 @@
 
 > **Made with AI, may contain errors.** This write-up was produced with an AI
 > assistant from reading the CrossPoint source (develop, commit `136c265`,
-> 2026-11-02) and from observations on one reader. The code references are real,
+> 2026-11-02) and from observations on two readers. The code references are real,
 > but the explanation of *why* it happens is a **hypothesis** that has not been
 > confirmed with serial logs. Edit it before posting.
 
 ## Summary
 
-On one reader, `reader.session` events (and `{event.ts}`) carried times that were
+On an Xteink X4 Pro, `reader.session` events (and `{event.ts}`) carried times that were
 about 50 to 80 minutes **ahead** of real time, although Settings, Clock showed
 the correct time and timezone. Two sessions read about 10 minutes apart had
 `start_time` values only about 30 seconds apart. A plugin that forwards these
-times to a server records the sessions in the future.
+times to a server records the sessions in the future. An Xteink X3 running the
+same firmware and the same plugin gave correct times.
 
 ## Environment
 
-- CrossPoint develop, commit `136c265` (2026-11-02).
-- One reader with a working clock screen (a US timezone,
-  Daylight Saving: Auto, 12-hour). Board and RTC details: _to fill in_.
-- A plugin subscribed to `reader.session`.
+- Firmware: CrossPoint 2.0 on both the X4 Pro and the X3, so the two devices run
+  the same firmware version.
+- **Affected:** Xteink X4 Pro (ESP32-S3), US timezone, Daylight Saving: Auto,
+  12-hour. The Clock screen showed the correct time.
+- **Not affected:** Xteink X3 (ESP32-C3), same plugin installed from the Plugin
+  Hub: session times were correct.
+- **Not tested:** Xteink X4 (ESP32-C3) and Xteink X4 Classic / X4C (ESP32-S3,
+  same board family and build as the X4 Pro). The X4C may be affected for that
+  reason, but this has not been confirmed.
+- A plugin subscribed to `reader.session` (BookOrbit Sync, installed from the
+  Plugin Hub).
 
 ## What was observed
 
@@ -52,6 +60,24 @@ times to a server records the sessions in the future.
   activities (the web server, `KOReaderSyncActivity`, and others), so `init()`
   runs again and re-applies the floor after each of them.
 
+## Device comparison
+
+The same plugin gave wrong times on the X4 Pro and correct times on the X3, on
+the same firmware version. The plugin only forwards the firmware's values, so
+this points at the firmware's behavior on that hardware, or at that one unit, not
+at the plugin. Two readings fit, and the data so far cannot tell them apart:
+
+1. **A bad saved floor on that one unit.** The floor is stored per device in
+   flash, so another device would not share it. This would match the hypothesis
+   below, and should clear once real time passes the floor.
+2. **Something specific to the S3 builds.** The X4 Pro and X4 Classic are
+   ESP32-S3; the X3 and X4 are ESP32-C3. `lib/TrustedTime/TrustedTime.h` is
+   written around the C3's behavior ("keeps time through deep sleep but loses it
+   on power-off"). Whether the S3 restarts or deep-sleep wake behave differently
+   here is not known.
+
+A test on an X4 Classic and an X4 would help decide between the two.
+
 ## Hypothesis
 
 If the persisted floor is ever ahead of real time (for example after a bad clock
@@ -79,6 +105,12 @@ book loans, but it is also used here for plain activity timestamps.
 3. Cap how far the floor may run ahead of an RTC or SNTP reading, and let a
    successful SNTP sync lower an implausibly high floor.
 4. Provide a way to reset the floor (for example in Settings, Clock).
+
+## Questions for the maintainers
+
+- Does the S3 path differ from the C3 in how the system clock survives
+  `ESP.restart()` and deep sleep?
+- Is there a way to see or reset the persisted floor from the UI?
 
 ## How to reproduce (to be confirmed)
 
