@@ -2,8 +2,8 @@
 
 > **Made with AI, may contain errors.** This plugin was written together with an
 > AI assistant (Claude, by Anthropic) and tested mostly against mock servers, the
-> BookOrbit source code and a desktop browser, with limited testing on one real
-> reader. Expect rough edges. Read the [known issues](KNOWN_ISSUES.md) and review
+> BookOrbit source code and a desktop browser, with limited testing on two real
+> readers (an Xteink X3 and an X4 Pro). Expect rough edges. Read the [known issues](KNOWN_ISSUES.md) and review
 > the code before you trust it with your BookOrbit login. You use it at your own
 > risk, and bug reports and fixes are welcome.
 
@@ -25,6 +25,21 @@ duration, start and end progress, and the book's partial-MD5). This plugin's
 request template turns each session into two page events and posts them
 straight to BookOrbit.
 
+## How this fits with CrossPoint's KOReader sync
+
+These are two separate features, and you can use either or both:
+
+- **CrossPoint's built-in KOReader sync (KOSync)** keeps your reading position
+  (page and percentage) in sync with BookOrbit. This plugin does not do that.
+- **This plugin** sends your reading sessions (time, duration, progress) so
+  BookOrbit's reading log, streaks and stats update. It does not need KOSync to be
+  turned on.
+
+For both position and stats, set up KOSync in CrossPoint's settings **and**
+install this plugin. They use the same BookOrbit KOReader sync login, but each is
+configured separately: KOSync in the reader's settings, the plugin on its web
+settings card.
+
 ## Requirements
 
 - A CrossPoint build that has SD plugins and the `reader.session` plugin event.
@@ -35,13 +50,15 @@ straight to BookOrbit.
   see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 - A BookOrbit server you can reach from the reader's WiFi, and a **KOReader sync**
   login for it (BookOrbit: Settings, Devices & Sync, KOReader). This is separate
-  from your BookOrbit web login.
+  from your BookOrbit web login. Turning on CrossPoint's own KOReader sync is
+  optional and only adds position sync; see "How this fits with CrossPoint's
+  KOReader sync" above.
 - The book on the reader must be the same file BookOrbit has (same partial-MD5).
   Books downloaded from BookOrbit's catalog match.
 
 ## Install
 
-**Plugin Hub:** search for "BookOrbit Reading Log" and install it.
+**Plugin Hub:** search for "BookOrbit Sync" and install it.
 
 **Manually:** copy the *contents* of `bookorbit-sync.crosspoint-plugin/` into a
 folder named exactly `bookorbit-sync` on the SD card, for example
@@ -79,6 +96,7 @@ Prefer files? Copy `config.example.json` to `config.json` and fill it in.
 - The device name is an ID the plugin sends with each session, to keep readers
   apart. It does not appear in BookOrbit's KOReader device list; that list comes
   from KOSync position sync, where CrossPoint always reports itself as "CrossPoint".
+
 ## Known issues
 
 See [KNOWN_ISSUES.md](KNOWN_ISSUES.md). The most important one is a **firmware**
@@ -107,7 +125,7 @@ fix it.
   validation, dedupe and session derivation; they check the settings page
   against a fake DOM, and check the Plugin Hub manifest rules. The generated
   events were also run through BookOrbit's own `deriveKoreaderSessions`.
-- `docs/`: the firmware clock issue write-up, release notes and publishing steps.
+- `docs/`: the firmware clock issue write-up and release notes.
 
 ## License
 
