@@ -23,9 +23,9 @@ same firmware and the same plugin gave correct times.
   12-hour. The Clock screen showed the correct time.
 - **Not affected:** Xteink X3 (ESP32-C3), same plugin installed from the Plugin
   Hub: session times were correct.
-- **Not tested:** Xteink X4 (ESP32-C3) and Xteink X4 Classic / X4C (ESP32-S3,
-  same board family and build as the X4 Pro). The X4C may be affected for that
-  reason, but this has not been confirmed.
+- **Not applicable:** an Xteink X4C (reported as ESP32-C3 rev4) has no clock
+  chip and no Clock option in Settings, so it was not compared.
+- **Not tested:** the original Xteink X4 (ESP32-C3).
 - A plugin subscribed to `reader.session` (BookOrbit Sync, installed from the
   Plugin Hub).
 
@@ -70,13 +70,15 @@ at the plugin. Two readings fit, and the data so far cannot tell them apart:
 1. **A bad saved floor on that one unit.** The floor is stored per device in
    flash, so another device would not share it. This would match the hypothesis
    below, and should clear once real time passes the floor.
-2. **Something specific to the S3 builds.** The X4 Pro and X4 Classic are
-   ESP32-S3; the X3 and X4 are ESP32-C3. `lib/TrustedTime/TrustedTime.h` is
+2. **Something specific to the S3 builds.** The X4 Pro is ESP32-S3; the X3 is
+   ESP32-C3. `lib/TrustedTime/TrustedTime.h` is
    written around the C3's behavior ("keeps time through deep sleep but loses it
    on power-off"). Whether the S3 restarts or deep-sleep wake behave differently
    here is not known.
 
-A test on an X4 Classic and an X4 would help decide between the two.
+Both the X3 and the X4 Pro have a clock chip and only the X4 Pro is wrong, which
+fits the S3-specific reading better. A test on another S3 device with a clock
+chip would help decide.
 
 ## Hypothesis
 
