@@ -1,0 +1,8 @@
+{
+  "name": "bookorbit-sync",
+  "title": "CrossPoint Plugin: BookOrbit Reading Log Sync",
+  "description": "Sends your reading sessions to BookOrbit",
+  "version": "0.9.0",
+  "mount": "settings",
+  "files": ["manifest.json", "device.json", "plugin.js", "config.example.json", "README.md"]
+}
