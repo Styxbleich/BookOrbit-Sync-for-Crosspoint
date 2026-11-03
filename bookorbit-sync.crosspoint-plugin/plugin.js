@@ -27,7 +27,10 @@ CrossPoint.registerPlugin(async (container, api) => {
   ];
 
   function md5Hex(text) {
-    const msg = new TextEncoder().encode(text);
+    return md5Bytes(new TextEncoder().encode(text));
+  }
+
+  function md5Bytes(msg) {
     const len = msg.length;
     const total = (((len + 8) >> 6) + 1) << 6;
     const buf = new Uint8Array(total);
@@ -65,6 +68,66 @@ CrossPoint.registerPlugin(async (container, api) => {
     let bin = '';
     for (const byte of bytes) bin += String.fromCharCode(byte);
     return btoa(bin);
+  }
+
+  // KOReader's "partial MD5" document id, which BookOrbit uses to recognise a book:
+  // md5 over 1 KiB samples at offset 0 and at 1024 << (2*i) for i = 0..10.
+  function partialMd5(bytes) {
+    const parts = [];
+    for (let i = -1; i <= 10; i++) {
+      const offset = i < 0 ? 0 : 1024 * Math.pow(4, i);
+      if (offset >= bytes.length) continue;
+      parts.push(bytes.subarray(offset, Math.min(offset + 1024, bytes.length)));
+    }
+    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) { all.set(p, at); at += p.length; }
+    return md5Bytes(all);
+  }
+
+  // "Added on Tuesday, November 3, 2026, 04:12 PM" -> "2026-11-03 16:12:00" (or null).
+  const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december'];
+  function addedOnToDatetime(text) {
+    const m = /Added on [A-Za-z]+, ([A-Za-z]+) (\d{1,2}), (\d{4}),? (\d{1,2}):(\d{2}) ?([AP]M)/i.exec(text || '');
+    if (!m) return null;
+    const month = MONTHS.indexOf(m[1].toLowerCase());
+    if (month < 0) return null;
+    let hour = parseInt(m[4], 10) % 12;
+    if (/PM/i.test(m[6])) hour += 12;
+    const p = (n) => String(n).padStart(2, '0');
+    return m[3] + '-' + p(month + 1) + '-' + p(parseInt(m[2], 10)) + ' ' + p(hour) + ':' + m[5] + ':00';
+  }
+
+  function nowDatetime() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+      p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  // CrossPoint's /My Clippings.txt, Kindle style:
+  //   Title (Author)\n- Your Highlight on Page 12 | Chapter | Added on ...\n\ntext\n==========
+  function parseClippings(text) {
+    const out = [];
+    for (const raw of String(text || '').split(/\r?\n==========\r?\n?/)) {
+      const lines = raw.replace(/^\uFEFF/, '').split(/\r?\n/);
+      while (lines.length && !lines[0].trim()) lines.shift();
+      if (lines.length < 2) continue;
+      const head = /^(.*) \(([^()]*)\)\s*$/.exec(lines[0]);
+      const loc = /^- Your Highlight on Page (\d+)(.*)$/.exec(lines[1]);
+      if (!loc) continue;
+      const bits = loc[2].split(' | ').map((s) => s.trim()).filter(Boolean);
+      const added = bits.length && /^Added on /.test(bits[bits.length - 1]) ? bits.pop() : '';
+      const quote = lines.slice(2).join('\n').trim();
+      if (!quote) continue;
+      out.push({
+        title: head ? head[1] : lines[0].trim(), author: head ? head[2] : '',
+        page: parseInt(loc[1], 10), chapter: bits.join(' | '),
+        datetime: addedOnToDatetime(added), text: quote
+      });
+    }
+    return out;
   }
 
   async function readText(path) {
@@ -136,6 +199,17 @@ CrossPoint.registerPlugin(async (container, api) => {
     'network. By default sessions are sent the next time the reader goes online, ' +
     'for example when you use the long-press or menu Sync progress action. ' +
     'This plugin was made with AI assistance and may contain errors.</p>' +
+    '<details id="bo-hl"><summary style="cursor:pointer"><strong>Highlights (experimental)</strong></summary>' +
+    '<p>Sends your most recent highlight from <code>/My Clippings.txt</code> to BookOrbit, as a test. ' +
+    'Enter the path of that book\'s EPUB on the SD card. Highlights only sync when the file is ' +
+    'identical to the one in BookOrbit. Reading the book file can take a while on the reader.</p>' +
+    '<div class="setting-row"><span class="setting-name">Book file</span>' +
+    '<span class="setting-control"><input type="text" id="bo-book" autocomplete="off" ' +
+    'placeholder="/Books/My Book.epub" style="width:100%"></span></div>' +
+    '<div class="setting-row"><span class="setting-control">' +
+    '<button type="button" id="bo-hl-check">Check book</button> ' +
+    '<button type="button" id="bo-hl-send">Send latest highlight</button></span></div>' +
+    '<p id="bo-hl-status" style="color:#666"></p></details>' +
     '</details>';
 
   // Show this card first on the Plugins page, above the other plugins.
@@ -301,6 +375,96 @@ CrossPoint.registerPlugin(async (container, api) => {
       $('bo-test').disabled = $('bo-save').disabled = false;
     }
   }
+
+  // ---- Highlights (experimental) ------------------------------------------
+  const PLUGIN_VERSION = 'crosspoint/0.10.0';
+  const hashCache = {};
+
+  function hlStatus(message, bad, good) {
+    const el = $('bo-hl-status');
+    el.textContent = message;
+    const color = good ? '#3fb950' : bad ? '#ff6b6b' : '#999';
+    el.style.color = color;
+    el.style.border = good || bad ? '1px solid ' + color : '1px solid transparent';
+    el.style.borderRadius = '6px';
+    el.style.padding = '8px 10px';
+    el.style.background = good ? 'rgba(63,185,80,0.12)' : bad ? 'rgba(255,107,107,0.12)' : 'transparent';
+  }
+
+  async function bookHash(path) {
+    if (hashCache[path]) return hashCache[path];
+    hlStatus('Reading the book from the reader (this can take a while)...');
+    const response = await fetch('/download?path=' + encodeURIComponent(path));
+    if (!response.ok) throw new Error('could not read ' + path + ' (check the path)');
+    const hash = partialMd5(new Uint8Array(await response.arrayBuffer()));
+    hashCache[path] = hash;
+    return hash;
+  }
+
+  async function postJson(endpoint, payload) {
+    const res = await api.relay('POST', saved.server + '/api/v1/koreader/plugin/' + endpoint, {
+      'Content-Type': 'application/json', accept: 'application/json',
+      'x-auth-user': saved.user, 'x-auth-key': saved.key
+    }, JSON.stringify(payload));
+    let data = null;
+    try { data = JSON.parse(res.body); } catch (e) { data = null; }
+    return { status: res.status, data };
+  }
+
+  function deviceInfo() {
+    return { deviceId: saved.device_id || 'crosspoint', deviceModel: 'CrossPoint',
+      pluginVersion: PLUGIN_VERSION, deviceTime: nowDatetime() };
+  }
+
+  async function highlightAction(send) {
+    if (!isConfigured()) return hlStatus('Save the server and login above first.', true);
+    const path = $('bo-book').value.trim();
+    if (!path.startsWith('/')) return hlStatus('Enter the book file path, starting with /.', true);
+    $('bo-hl-check').disabled = $('bo-hl-send').disabled = true;
+    try {
+      const hash = await bookHash(path);
+      let entry = null;
+      if (send) {
+        const clippings = parseClippings(await readText('/My Clippings.txt'));
+        if (!clippings.length) throw new Error('no highlights found in /My Clippings.txt');
+        entry = clippings[clippings.length - 1];
+      }
+      hlStatus('Asking BookOrbit...');
+      if (!send) {
+        const r = await postJson('match-check', Object.assign(deviceInfo(), { hashes: [hash] }));
+        if (r.status !== 200 || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
+        const match = (r.data.matches || [])[0];
+        if (!match) return hlStatus('BookOrbit does not have this exact file (hash ' + hash + ').', true);
+        if (match.positionCompatible === false) {
+          return hlStatus('BookOrbit has this book, but the file differs from its copy, so highlights will not sync.', true);
+        }
+        return hlStatus('BookOrbit has this exact file (hash ' + hash + '). Highlights can sync.', false, true);
+      }
+      const annotation = {
+        datetime: entry.datetime || nowDatetime(), drawer: 'lighten', text: entry.text.slice(0, 10000),
+        chapter: entry.chapter.slice(0, 500), pageno: entry.page, posFormat: 'xpointer',
+        pos0: '/body/DocFragment[1]/body/text().0'
+      };
+      const r = await postJson('annotations', Object.assign(deviceInfo(), {
+        books: [{ hash, annotations: [annotation] }]
+      }));
+      if (r.status !== 200 || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
+      if ((r.data.unmatched || []).length) {
+        return hlStatus('BookOrbit does not have this exact file, so the highlight was not stored.', true);
+      }
+      const upserted = ((r.data.results || [])[0] || {}).upserted || 0;
+      const quote = entry.text.length > 70 ? entry.text.slice(0, 70) + '...' : entry.text;
+      return hlStatus('Sent. BookOrbit stored ' + upserted + ' highlight (' + quote +
+        '). Check the book in BookOrbit. The position is approximate.', upserted === 0, upserted > 0);
+    } catch (e) {
+      hlStatus('Could not finish: ' + (e && e.message ? e.message : e), true);
+    } finally {
+      $('bo-hl-check').disabled = $('bo-hl-send').disabled = false;
+    }
+  }
+
+  $('bo-hl-check').onclick = () => highlightAction(false);
+  $('bo-hl-send').onclick = () => highlightAction(true);
 
   $('bo-test').onclick = () => run(false);
   $('bo-save').onclick = () => run(true);

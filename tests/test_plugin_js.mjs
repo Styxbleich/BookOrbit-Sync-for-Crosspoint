@@ -11,10 +11,11 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(here, '..', 'bookorbit-sync.crosspoint-plugin', 'plugin.js'), 'utf8');
 
-async function load({ existing = null, device = null, events = null, relay }) {
+async function load({ existing = null, device = null, events = null, relay, files = {} }) {
   const els = {};
   const getEl = (id) => (els[id] ||= { id, value: '', placeholder: '', textContent: '', style: {}, disabled: false });
   const document = { getElementById: getEl };
+  getEl('bo-book'); // an input the page creates, which tests fill in before any click
   const writes = [];
   const relays = [];
   let register;
@@ -22,6 +23,13 @@ async function load({ existing = null, device = null, events = null, relay }) {
     document, TextEncoder, btoa, console,
     CrossPoint: { registerPlugin: (fn) => { register = fn; } },
     fetch: async (url) => {
+      const asked = url.startsWith('/download?path=') ? decodeURIComponent(url.slice('/download?path='.length)) : null;
+      if (asked !== null && files[asked] !== undefined) {
+        const f = files[asked];
+        const buf = Buffer.isBuffer(f) ? f : Buffer.from(f, 'utf8');
+        return { ok: true, text: async () => buf.toString('utf8'),
+          arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
+      }
       if (url.includes('events.jsonl')) return { ok: events !== null, text: async () => events };
       const isDev = url.includes('device.json');
       const body = isDev ? device : existing;
@@ -36,7 +44,7 @@ async function load({ existing = null, device = null, events = null, relay }) {
   host.children.push(container);
   const api = {
     name: 'bookorbit-sync', dir: '/plugins/bookorbit-sync',
-    relay: async (m, u, h, b) => { relays.push({ m, u, h }); return relay(m, u, h, b); },
+    relay: async (m, u, h, b) => { relays.push({ m, u, h, body: b }); return relay(m, u, h, b); },
     writeFile: async (p, b64) => { writes.push({ p, text: Buffer.from(b64, 'base64').toString('utf8') }); return { ok: true }; }
   };
   await register(container, api);
@@ -257,4 +265,115 @@ test('a hold left by an earlier version is undone so sessions are not blocked', 
 test('the card no longer has hold, time source or queue controls', async () => {
   const { els } = await load({ device: DEVICE, relay: async () => ({ status: 200 }) });
   for (const id of ['bo-hold', 'bo-time', 'bo-refresh', 'bo-queue']) assert.equal(els[id], undefined, id);
+});
+
+
+// ---- Highlights (experimental) ---------------------------------------------
+const CONFIG = JSON.stringify({ server: 'http://h:1', user: 'u', key: 'k', device_id: 'x4pro' });
+const CLIPS = [
+  'Dune (Frank Herbert)\n- Your Highlight on Page 12 | Book One | Added on Monday, November 2, 2026, 09:05 AM\n\nFirst quote\n==========\n',
+  'Dune (Frank Herbert)\n- Your Highlight on Page 40 | Part 2 | The Gom Jabbar | Added on Tuesday, November 3, 2026, 04:12 PM\n\nFear is the mind-killer.\nSecond line.\n==========\n'
+].join('');
+
+function refPartialMd5(buf) {
+  const parts = [];
+  for (let i = -1; i <= 10; i++) {
+    const off = i < 0 ? 0 : 1024 * 4 ** i;
+    if (off >= buf.length) continue;
+    parts.push(buf.subarray(off, Math.min(off + 1024, buf.length)));
+  }
+  return crypto.createHash('md5').update(Buffer.concat(parts)).digest('hex');
+}
+
+test('highlights: book hash matches KOReader partial md5 for many sizes', async () => {
+  for (const n of [10, 1024, 1025, 4097, 20000, 70000, 2000000]) {
+    const epub = crypto.randomBytes(n);
+    const { els, relays } = await load({
+      existing: CONFIG, files: { '/Books/b.epub': epub },
+      relay: async () => ({ status: 200, body: JSON.stringify({ matches: [{ hash: 'x', bookId: 1, bookFileId: 2 }], libraryVersion: 'v' }) })
+    });
+    els['bo-book'].value = '/Books/b.epub';
+    await els['bo-hl-check'].onclick();
+    const body = JSON.parse(relays[0].body);
+    assert.deepEqual(body.hashes, [refPartialMd5(epub)], 'size ' + n);
+    assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
+  }
+});
+
+test('highlights: sends the latest highlight with hash, page, chapter and time', async () => {
+  const epub = crypto.randomBytes(30000);
+  const { els, relays } = await load({
+    existing: CONFIG, files: { '/Books/b.epub': epub, '/My Clippings.txt': CLIPS },
+    relay: async () => ({ status: 200, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+  });
+  els['bo-book'].value = '/Books/b.epub';
+  await els['bo-hl-send'].onclick();
+  const call = relays.find((r) => r.u.endsWith('/annotations'));
+  assert.equal(call.u, 'http://h:1/api/v1/koreader/plugin/annotations');
+  assert.equal(call.h['x-auth-key'], 'k');
+  const body = JSON.parse(call.body);
+  assert.equal(body.deviceId, 'x4pro');
+  assert.ok(body.pluginVersion.length <= 20);
+  assert.equal(body.books[0].hash, refPartialMd5(epub));
+  const a = body.books[0].annotations[0];
+  assert.equal(a.text, 'Fear is the mind-killer.\nSecond line.');
+  assert.equal(a.pageno, 40);
+  assert.equal(a.chapter, 'Part 2 | The Gom Jabbar');
+  assert.equal(a.datetime, '2026-11-03 16:12:00');
+  assert.equal(a.drawer, 'lighten');
+  assert.equal(a.posFormat, 'xpointer');
+  assert.match(a.pos0, /^\/body\/DocFragment\[1\]/);
+  assert.match(body.deviceTime, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+  assert.match(els['bo-hl-status'].textContent, /^Sent\./);
+});
+
+test('highlights: 12 AM / 12 PM and a missing "Added on" are handled', async () => {
+  const mk = (when) => 'B (A)\n- Your Highlight on Page 1' + when + '\n\nq\n==========\n';
+  for (const [clip, expect] of [
+    [mk(' | Added on Friday, January 5, 2026, 12:30 AM'), '2026-01-05 00:30:00'],
+    [mk(' | Added on Friday, January 5, 2026, 12:30 PM'), '2026-01-05 12:30:00'],
+    [mk(''), /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/]
+  ]) {
+    const { els, relays } = await load({
+      existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': clip },
+      relay: async () => ({ status: 200, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+    });
+    els['bo-book'].value = '/b.epub';
+    await els['bo-hl-send'].onclick();
+    const dt = JSON.parse(relays[0].body).books[0].annotations[0].datetime;
+    if (expect instanceof RegExp) assert.match(dt, expect); else assert.equal(dt, expect);
+  }
+});
+
+test('highlights: clear messages for the failure cases', async () => {
+  const ok = { status: 200, body: JSON.stringify({ results: [], unmatched: ['h'] }) };
+  const cases = [
+    [{ existing: null, files: {}, relay: async () => ok }, '/b.epub', /Save the server and login/],
+    [{ existing: CONFIG, files: {}, relay: async () => ok }, 'b.epub', /starting with \//],
+    [{ existing: CONFIG, files: {}, relay: async () => ok }, '/nope.epub', /could not read \/nope\.epub/],
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a') }, relay: async () => ok }, '/b.epub', /no highlights found/],
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS }, relay: async () => ok }, '/b.epub', /does not have this exact file/],
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS }, relay: async () => ({ status: 401, body: '' }) }, '/b.epub', /answered 401/]
+  ];
+  for (const [opts, bookPath, re] of cases) {
+    const { els } = await load(opts);
+    els['bo-book'].value = bookPath;
+    await els['bo-hl-send'].onclick();
+    assert.match(els['bo-hl-status'].textContent, re);
+    assert.equal(els['bo-hl-send'].disabled, false);
+  }
+});
+
+test('highlights: check book reports a differing copy and an unknown file', async () => {
+  const run = async (data) => {
+    const { els } = await load({
+      existing: CONFIG, files: { '/b.epub': Buffer.from('abc') },
+      relay: async () => ({ status: 200, body: JSON.stringify(data) })
+    });
+    els['bo-book'].value = '/b.epub';
+    await els['bo-hl-check'].onclick();
+    return els['bo-hl-status'].textContent;
+  };
+  assert.match(await run({ matches: [], libraryVersion: 'v' }), /does not have this exact file/);
+  assert.match(await run({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2, positionCompatible: false }], libraryVersion: 'v' }), /differs from its copy/);
 });
