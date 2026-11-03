@@ -1,4 +1,4 @@
-# CrossPoint Plugin: BookOrbit Reading Log Sync
+# BookOrbit Sync
 
 > **Made with AI, may contain errors.** This plugin was written together with an
 > AI assistant (Claude, by Anthropic) and tested mostly against mock servers, the
@@ -30,6 +30,9 @@ straight to BookOrbit.
 - A CrossPoint build that has SD plugins and the `reader.session` plugin event.
   At the time of writing that is the develop branch, not a stable release (see
   crosspoint-reader issue #2612).
+- A reader with a clock chip: **Settings has a Clock option** (for example the
+  Xteink X3 and X4 Pro). Readers without one, such as the X4C, are not supported;
+  see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 - A BookOrbit server you can reach from the reader's WiFi, and a **KOReader sync**
   login for it (BookOrbit: Settings, Devices & Sync, KOReader). This is separate
   from your BookOrbit web login.
