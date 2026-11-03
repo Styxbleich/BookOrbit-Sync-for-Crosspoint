@@ -2,7 +2,7 @@
 
 > **Made with AI, may contain errors.** This plugin was written together with an
 > AI assistant and has had limited testing on real hardware. See
-> [KNOWN_ISSUES.md](github.com/Styxbleich/BookOrbit-Sync-for-Crosspoint/blob/main/KNOWN_ISSUES.md).
+> [KNOWN_ISSUES.md](https://github.com/Styxbleich/BookOrbit-Sync-for-Crosspoint/blob/main/KNOWN_ISSUES.md).
 
 First public release. Sends each reading session from CrossPoint to a
 self-hosted BookOrbit server so it appears in the reading log, streaks and stats.
