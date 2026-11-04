@@ -10,11 +10,15 @@
   own session-derivation code, fake-DOM tests of the settings page, and a
   desktop browser.
 - Tested on real hardware: an Xteink X4 Pro and an Xteink X3, one BookOrbit
-  server, a short period. Delivery to BookOrbit worked on both. Other models
+  server, a short period. Session delivery to BookOrbit worked on both. The
+  highlights features were tried on the X4 Pro with a few highlights in one
+  book (sending, the position opening correctly in BookOrbit's web reader,
+  pulling, saving the text file and the recent-books list). Other models
   (X4 and others) are untested. The X4C has no clock chip and is not supported. Several details below were worked out by
   reading CrossPoint's source and have **not** been confirmed on hardware.
-- Not tested: other readers or firmware builds, Plugin Hub installs and updates,
-  very long sessions, and many books over a long time.
+- Not tested: other readers or firmware builds, Plugin Hub updates from an older
+  version, very long sessions, many books over a long time, books with hundreds of
+  highlights, and highlight edits or deletions made after sending.
 
 ## 1. Sessions can be stamped in the future after a restart (firmware)
 
@@ -129,3 +133,48 @@ public, versioned API for third parties and could change.
 
 The "BookOrbit: session sent" popup, the sleep-time delivery path on current
 firmware, and the behaviour on devices without a battery-backed clock.
+
+## 12. Highlights
+
+The highlights feature runs from the settings page in your browser when you press
+a button; it is not automatic, because plugin events cannot read files.
+
+- **Same file required.** BookOrbit only accepts highlights for the exact file it
+  has. If you changed the file's metadata inside BookOrbit, the copy on the reader
+  no longer matches and the result says the file differs. Download it again.
+- **Matched by book title.** The plugin sends the highlights in `/My Clippings.txt`
+  whose title matches the selected book's title (from the EPUB or the reader's
+  recent list). If the reader wrote a different title, nothing is sent and the box
+  says so. It never sends another book's highlights.
+- **Finding the spot.** BookOrbit needs a position inside the book, which the
+  reader does not store in that form, so the plugin searches the EPUB for the
+  highlighted text. A quote that appears more than once is placed in the chapter
+  named in the highlight, or else at its first match (the result box warns when
+  that happens). Text that cannot be found (for example a highlight spanning
+  something unusual in the markup) is still sent, but shows "Anchor lost" in the
+  web reader. Highlights that are only partly found are flagged as approximate.
+  The reader also stores the section number and paragraph for each highlight,
+  which could make this exact; the plugin does not use them yet.
+- **Slow on big books.** The EPUB is read through the reader's web server, one
+  chapter at a time in your browser, so large books can take a while.
+- **Recent books only.** The dropdown is the reader's list of its last 10 opened
+  EPUBs; finished books drop off it. Use "Another book (type its path)" for any
+  other book.
+- **One way, and no clean-up.** Sending adds highlights to BookOrbit. Editing or
+  deleting a highlight on the reader afterwards does not change BookOrbit, and
+  edits or deletions in BookOrbit do not change the reader. Pulling does not put
+  highlights into the reader's own highlight list; it only shows them and saves a
+  text file.
+- **How pulling works.** BookOrbit's plugin login has no plain "list highlights"
+  call, so pulling uses its device sync exchange: it presents the book as an empty
+  copy and acknowledges each page of results. It keeps its own sync record per
+  book copy on the server. Nothing odd has been seen, but long-term effects on
+  BookOrbit's sync state have not been studied.
+- **Text file limit.** The reader accepts files up to about 250 KB from a plugin.
+  If a book has more highlights than fit, the first ones that fit are saved and the
+  box says how many.
+- **Highlight times.** The time of a highlight comes from the reader's own clock,
+  so a reader with a wrong clock (see issue 1) can show wrong times.
+- **Highlight limits on the reader.** CrossPoint itself caps the number of
+  highlights per book (256 on ESP32-C3 readers, 1024 on ESP32-S3 readers, from its
+  source).

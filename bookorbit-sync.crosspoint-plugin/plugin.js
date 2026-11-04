@@ -1,4 +1,4 @@
-// BookOrbit Reading Log: settings card for the CrossPoint web interface.
+// BookOrbit Sync: settings card for the CrossPoint web interface.
 // Made with AI assistance and lightly tested: it may contain errors. Review before trusting it.
 // Writes config.json next to this plugin; device.json reads it as {cfg.*}.
 CrossPoint.registerPlugin(async (container, api) => {
@@ -379,14 +379,14 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   const $ = (id) => document.getElementById(id);
-  const PLUGIN_VERSION = 'crosspoint/0.11.4';
+  const PLUGIN_VERSION = 'crosspoint/0.12.0';
 
   container.innerHTML =
     '<details id="bo-panel"><summary style="cursor:pointer">' +
-    '<h2 style="display:inline-block;margin:0">BookOrbit Reading Log</h2> ' +
+    '<h2 style="display:inline-block;margin:0">BookOrbit Sync</h2> ' +
     '<span id="bo-state" style="color:#666;font-size:0.9em"></span></summary>' +
     '<p id="bo-version" style="color:#666;font-size:0.9em;margin:12px 0 16px">Version: v' + PLUGIN_VERSION.split('/')[1] + '</p>' +
-    '<p>Sends your reading sessions to BookOrbit. Use the KOReader sync login ' +
+    '<p>Sends your reading sessions and highlights to BookOrbit. Use the KOReader sync login ' +
     'from BookOrbit (Settings &gt; Devices &amp; Sync &gt; KOReader).</p>' +
     '<div class="setting-row"><span class="setting-name">Server URL</span>' +
     '<span class="setting-control"><input type="text" id="bo-server" autocomplete="off" ' +
@@ -412,7 +412,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     'network. By default sessions are sent the next time the reader goes online, ' +
     'for example when you use the long-press or menu Sync progress action. ' +
     'This plugin was made with AI assistance and may contain errors.</p>' +
-    '<details id="bo-hl"><summary style="cursor:pointer"><strong>Highlights (experimental)</strong></summary>' +
+    '<details id="bo-hl"><summary style="cursor:pointer"><strong>Highlights</strong></summary>' +
     '<p>Sends this book\'s highlights from <code>/My Clippings.txt</code> to BookOrbit. ' +
     'Pick the book below. Highlights only sync when the file is ' +
     'identical to the one in BookOrbit. Reading the book file can take a while on the reader.</p>' +
@@ -594,7 +594,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     }
   }
 
-  // ---- Highlights (experimental) ------------------------------------------
+  // ---- Highlights ------------------------------------------
 
   // good = green, bad = red, warn = orange (nothing wrong, but nothing was sent either)
   function hlStatus(message, bad, good, warn) {

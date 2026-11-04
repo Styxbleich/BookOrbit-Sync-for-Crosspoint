@@ -270,7 +270,7 @@ test('the card no longer has hold, time source or queue controls', async () => {
 });
 
 
-// ---- Highlights (experimental) ---------------------------------------------
+// ---- Highlights ---------------------------------------------
 const CONFIG = JSON.stringify({ server: 'http://h:1', user: 'u', key: 'k', device_id: 'x4pro' });
 const rec = (p, title) => JSON.stringify({ books: [{ path: p, title, author: '', coverBmpPath: '' }] });
 const CLIPS = [
