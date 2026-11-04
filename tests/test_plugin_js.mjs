@@ -302,7 +302,7 @@ test('highlights: book hash matches KOReader partial md5 for many sizes', async 
   }
 });
 
-test('highlights: sends the latest highlight with hash, page, chapter and time', async () => {
+test('highlights: sends the book\'s highlights with hash, page, chapter and time', async () => {
   const epub = crypto.randomBytes(30000);
   const { els, relays } = await load({
     existing: CONFIG, files: { '/Books/b.epub': epub, '/My Clippings.txt': CLIPS },
@@ -317,7 +317,8 @@ test('highlights: sends the latest highlight with hash, page, chapter and time',
   assert.equal(body.deviceId, 'x4pro');
   assert.ok(body.pluginVersion.length <= 20);
   assert.equal(body.books[0].hash, refPartialMd5(epub));
-  const a = body.books[0].annotations[0];
+  assert.equal(body.books[0].annotations.length, 2);
+  const a = body.books[0].annotations[1];
   assert.equal(a.text, 'Fear is the mind-killer.\nSecond line.');
   assert.equal(a.pageno, 40);
   assert.equal(a.chapter, 'Part 2 | The Gom Jabbar');
@@ -455,22 +456,22 @@ test('highlight position: text spanning inline markup gets exact start and end p
   assert.equal(a.pos0, '/body/DocFragment[2]/body/div[1]/p[2]/text()[1].0');
   assert.equal(a.pos1, '/body/DocFragment[2]/body/div[1]/p[2]/text()[2].18');
   assert.equal(resolveXPointer(CH_TWO, a.pos0).slice(0, 12), 'We ended up ');
-  assert.match(status, /Found it in section 2/);
-  assert.doesNotMatch(status, /appears/);
+  assert.match(status, /1 of 1 found in the book/);
+  assert.doesNotMatch(status, /more than once/);
 });
 
 test('highlight position: a repeated quote prefers the chapter named in the clipping', async () => {
   const two = await sendFor('We ended up hiring five mercenaries.', 'Chapter Two', CHAPTERS);
   assert.match(two.a.pos0, /^\/body\/DocFragment\[2\]\//);
-  assert.doesNotMatch(two.status, /appears/);
+  assert.doesNotMatch(two.status, /more than once/);
   const three = await sendFor('We ended up hiring five mercenaries.', 'Chapter Three', CHAPTERS);
   assert.equal(three.a.pos0, '/body/DocFragment[3]/body/section[1]/p[2]/text()[1].0');
   assert.equal(resolveXPointer(CH_THREE, three.a.pos0), 'We ended up hiring five mercenaries.');
-  assert.doesNotMatch(three.status, /appears/);
+  assert.doesNotMatch(three.status, /more than once/);
   // no chapter to go by: take the first one and warn that the text repeats
   const unknown = await sendFor('We ended up hiring five mercenaries.', 'Some other title', CHAPTERS);
   assert.match(unknown.a.pos0, /^\/body\/DocFragment\[2\]\//);
-  assert.match(unknown.status, /appears 2 times/);
+  assert.match(unknown.status, /more than once/);
 });
 
 test('highlight position: whitespace, accents and emoji (UTF-16 pairs) are handled', async () => {
@@ -489,4 +490,146 @@ test('highlight position: text that is not in the book falls back to a placehold
   assert.equal(a.pos0, '/body/DocFragment[1]/body/text().0');
   assert.equal(a.pos1, undefined);
   assert.match(status, /placeholder/);
+});
+
+test('highlights: every highlight of the book is sent in one request, other books are left out', async () => {
+  const chapters = [{ name: 'one.xhtml', xhtml: XHTML('One', '<h1>Chapter One</h1><p>Alpha beta gamma.</p><p>Delta epsilon.</p>') },
+    { name: 'two.xhtml', xhtml: XHTML('Two', '<h1>Chapter Two</h1><p>Alpha beta gamma.</p><p>Zeta eta theta.</p>') }];
+  const epub = await makeEpub(chapters);
+  const opfTitle = 'The Real Title';
+  const zip = await JSZip.loadAsync(epub);
+  const opf = await zip.file('OEBPS/content.opf').async('string');
+  zip.file('OEBPS/content.opf', opf.replace('<manifest>', '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>' + opfTitle + '</dc:title></metadata><manifest>'));
+  const titled = await zip.generateAsync({ type: 'nodebuffer' });
+  const clip = (title, page, chap, text, min) => title + ' (Au)\n- Your Highlight on Page ' + page + ' | ' + chap +
+    ' | Added on Tuesday, November 3, 2026, 04:' + min + ' PM\n\n' + text + '\n==========\n';
+  const clips = clip('The Real Title', 1, 'Chapter One', 'Delta epsilon.', '10') +
+    clip('Other Book', 9, 'X', 'Zeta eta theta.', '11') +
+    clip('The Real Title', 2, 'Chapter Two', 'Alpha beta gamma.', '12') +
+    clip('The Real Title', 3, 'Chapter Two', 'Not in the book at all', '13');
+  const { els, relays } = await load({
+    existing: CONFIG, files: { '/b.epub': titled, '/My Clippings.txt': clips },
+    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 3 }], unmatched: [] }) })
+  });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-send'].onclick();
+  const sent = relays.filter((r) => r.u.endsWith('/annotations'));
+  assert.equal(sent.length, 1);
+  const anns = JSON.parse(sent[0].body).books[0].annotations;
+  assert.deepEqual(anns.map((a) => a.text), ['Delta epsilon.', 'Alpha beta gamma.', 'Not in the book at all']);
+  assert.match(anns[0].pos0, /^\/body\/DocFragment\[1\]\/body\/p\[2\]\/text\(\)\[1\]\.0$/);
+  assert.match(anns[1].pos0, /^\/body\/DocFragment\[2\]\//, 'chapter title picks the second occurrence');
+  assert.equal(anns[2].pos0, '/body/DocFragment[1]/body/text().0');
+  const msg = els['bo-hl-status'].textContent;
+  assert.match(msg, /^Sent\. 3 new\. 2 of 3 found in the book, 1 could not be found/);
+  assert.doesNotMatch(msg, /did not match/);
+});
+
+test('highlights: when the book title matches nothing, the most recently highlighted book is used and says so', async () => {
+  const plain = await JSZip.loadAsync(await makeEpub(CHAPTERS));
+  const opf = await plain.file('OEBPS/content.opf').async('string');
+  plain.file('OEBPS/content.opf', opf.replace('<manifest>', '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Some Other Title</dc:title></metadata><manifest>'));
+  const epub = await plain.generateAsync({ type: 'nodebuffer' });
+  const clips = 'Old Book (A)\n- Your Highlight on Page 1 | C | Added on Monday, November 2, 2026, 09:05 AM\n\nOpening words.\n==========\n' +
+    'New Book (A)\n- Your Highlight on Page 1 | Chapter One | Added on Tuesday, November 3, 2026, 04:12 PM\n\nOpening words.\n==========\n';
+  const { els, relays } = await load({
+    existing: CONFIG, files: { '/b.epub': epub, '/My Clippings.txt': clips },
+    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+  });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-send'].onclick();
+  const anns = JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body).books[0].annotations;
+  assert.equal(anns.length, 1);
+  assert.match(els['bo-hl-status'].textContent, /used the highlights of "New Book"/);
+});
+
+test('highlights: when everything is already in BookOrbit the box is orange, not red', async () => {
+  const { els } = await load({
+    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS },
+    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 0 }], unmatched: [] }) })
+  });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-send'].onclick();
+  const box = els['bo-hl-status'];
+  assert.match(box.textContent, /^Nothing new to send: all 2 highlights are already in BookOrbit\.$/);
+  assert.equal(box.style.color, '#f0a030');
+});
+
+// ---- Pulling highlights from BookOrbit --------------------------------------
+async function epubWithMeta(title, author) {
+  const zip = await JSZip.loadAsync(await makeEpub(CHAPTERS));
+  const opf = await zip.file('OEBPS/content.opf').async('string');
+  zip.file('OEBPS/content.opf', opf.replace('<manifest>', '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>' +
+    title + '</dc:title><dc:creator>' + author + '</dc:creator></metadata><manifest>'));
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+const add = (id, page, chapter, text, note) => ({ serverId: id, version: 1, datetime: '2026-11-03 21:0' + id + ':00', drawer: 'lighten',
+  color: 'yellow', text, note: note || null, chapter, posFormat: 'xpointer', pos0: '/body/DocFragment[1]/body/p[1]/text()[1].0', pos1: null, pageno: page });
+
+test('pull: pages through BookOrbit, acknowledges each page, lists and saves BOOKNAME - AUTHOR Highlights.txt', async () => {
+  const epub = await epubWithMeta('The Butcher’s Masquerade', 'Matt Dinniman');
+  const pages = [
+    { results: [{ hash: 'h', bookId: 1, toApply: { add: [add(2, 30, 'Chapter 7', 'Second <b>one</b> & more'), add(1, 27, 'Chapter 6', 'I’ve got “quotes”', 'my note')], edit: [], delete: [] }, more: true }], unmatched: [], positionIncompatible: [] },
+    { results: [{ hash: 'h', bookId: 1, toApply: { add: [add(3, 31, 'Chapter 7', 'Third')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }
+  ];
+  let n = 0;
+  const { els, relays, writes } = await load({
+    existing: CONFIG, files: { '/Books/Dinniman, Matt/b.epub': epub },
+    relay: async (m, u) => ({ status: 201, body: JSON.stringify(u.endsWith('/exchange') ? pages[n++] : { results: [], unmatched: [], positionIncompatible: [] }) })
+  });
+  els['bo-book'].value = '/Books/Dinniman, Matt/b.epub';
+  await els['bo-hl-pull'].onclick();
+  const calls = relays.map((r) => r.u.split('/').pop());
+  assert.deepEqual(calls, ['exchange', 'exchange-ack', 'exchange', 'exchange-ack']);
+  const first = JSON.parse(relays[0].body).books[0];
+  assert.deepEqual([first.sidecarState, first.keysComplete, first.keys, first.changes], ['new', false, [], []]);
+  assert.equal(JSON.parse(relays[2].body).books[0].sidecarState, 'known');
+  assert.deepEqual(JSON.parse(relays[1].body).books[0].applied.map((a) => a.serverId), [2, 1]);
+  assert.match(els['bo-hl-status'].textContent, /^Got 3 highlights from BookOrbit/);
+  const html = els['bo-hl-list'].innerHTML;
+  assert.ok(html.indexOf('quotes') < html.indexOf('Second'), 'sorted by page');
+  assert.match(html, /Second &lt;b&gt;one&lt;\/b&gt; &amp; more/, 'text is escaped');
+  assert.match(html, /Note: my note/);
+  assert.equal(els['bo-hl-save'].disabled, false);
+  await els['bo-hl-save'].onclick();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].p, '/Books/Dinniman, Matt/The Butcher’s Masquerade - Matt Dinniman Highlights.txt');
+  assert.match(writes[0].text, /^The Butcher’s Masquerade\nMatt Dinniman\nHighlights from BookOrbit \(3\)\n\n== Chapter 6 ==\n\n\[p\. 27\] I’ve got “quotes”\nNote: my note\n\n== Chapter 7 ==\n\n\[p\. 30\] Second <b>one<\/b> & more\n\n\[p\. 31\] Third\n$/);
+  assert.match(els['bo-hl-status'].textContent, /^Saved 3 highlights to /);
+});
+
+test('pull: file name drops characters the SD card cannot hold, and falls back to the file name', async () => {
+  const epub = await epubWithMeta('Who: What? / Why*', 'A. "Author"');
+  const { els, writes } = await load({
+    existing: CONFIG, files: { '/b.epub': epub, '/plain.epub': Buffer.from('not a zip') },
+    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 1, 'C', 'x')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }) })
+  });
+  for (const [book, expected] of [['/b.epub', '/Who What Why - A. Author Highlights.txt'], ['/plain.epub', '/plain Highlights.txt']]) {
+    els['bo-book'].value = book;
+    await els['bo-hl-pull'].onclick();
+    await els['bo-hl-save'].onclick();
+    assert.equal(writes[writes.length - 1].p, expected);
+  }
+});
+
+test('pull: no highlights is orange, unknown or differing files are red, save needs a pull first', async () => {
+  const run = async (data) => {
+    const { els, writes } = await load({ existing: CONFIG, files: { '/b.epub': Buffer.from('abc') },
+      relay: async () => ({ status: 201, body: JSON.stringify(data) }) });
+    els['bo-book'].value = '/b.epub';
+    await els['bo-hl-pull'].onclick();
+    return { box: els['bo-hl-status'], saveDisabled: els['bo-hl-save'].disabled, writes };
+  };
+  const none = await run({ results: [{ hash: 'h', bookId: 1, toApply: { add: [], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
+  assert.match(none.box.textContent, /no highlights for this book yet/);
+  assert.equal(none.box.style.color, '#f0a030');
+  assert.equal(none.saveDisabled, true);
+  const unknown = await run({ results: [], unmatched: ['h'], positionIncompatible: [] });
+  assert.match(unknown.box.textContent, /does not have this exact file/);
+  assert.equal(unknown.box.style.color, '#ff6b6b');
+  const differs = await run({ results: [], unmatched: [], positionIncompatible: ['h'] });
+  assert.match(differs.box.textContent, /file differs from its copy/);
+  const { els } = await load({ existing: CONFIG, relay: async () => ({ status: 200, body: '{}' }) });
+  await els['bo-hl-save'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /Pull the highlights first/);
 });

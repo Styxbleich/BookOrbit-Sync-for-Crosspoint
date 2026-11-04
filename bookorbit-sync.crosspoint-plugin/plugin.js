@@ -181,10 +181,15 @@ CrossPoint.registerPlugin(async (container, api) => {
     const manifest = {};
     for (const item of Array.from(opf.getElementsByTagName('item'))) manifest[item.getAttribute('id')] = item.getAttribute('href');
     const dir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/')) : '';
-    return Array.from(opf.getElementsByTagName('itemref')).map((ref) => {
+    const spine = Array.from(opf.getElementsByTagName('itemref')).map((ref) => {
       const href = manifest[ref.getAttribute('idref')];
       return href ? joinPath(dir, href) : null;
     });
+    const titleEl = opf.getElementsByTagName('dc:title')[0] || opf.getElementsByTagName('title')[0];
+    spine.title = titleEl ? String(titleEl.textContent || '').trim() : '';
+    const authorEl = opf.getElementsByTagName('dc:creator')[0] || opf.getElementsByTagName('creator')[0];
+    spine.author = authorEl ? String(authorEl.textContent || '').trim() : '';
+    return spine;
   }
 
   const SKIP_TAGS = { script: 1, style: 1, head: 1, title: 1 };
@@ -259,28 +264,37 @@ CrossPoint.registerPlugin(async (container, api) => {
       '/text()[' + own + '].' + offset;
   }
 
-  // Finds the highlighted text in the book. Returns null when it cannot be found.
-  async function locateHighlight(bytes, quote, chapter, progress) {
-    const wanted = normalizeQuote(quote);
-    if (!wanted) return null;
+  // Reads the whole book once: the visible text of every chapter, so each highlight is then a
+  // quick search instead of another trip through the ZIP.
+  async function openBook(bytes, progress) {
     const Zip = await ensureJSZip();
     const zip = await Zip.loadAsync(bytes);
     const spine = await readSpine(zip);
-    const candidates = [];
-    let total = 0;
+    const texts = [];
     for (let i = 0; i < spine.length; i++) {
-      if (!spine[i]) continue;
-      const file = zip.file(spine[i]);
+      texts.push(null);
+      const file = spine[i] && zip.file(spine[i]);
       if (!file) continue;
       if (progress && i % 10 === 0) progress(i + 1, spine.length);
-      const doc = parseMarkup(await file.async('string'));
-      const body = doc.getElementsByTagName('body')[0];
-      if (!body) continue;
-      const indexed = indexText(body);
+      const body = parseMarkup(await file.async('string')).getElementsByTagName('body')[0];
+      if (body) texts[i] = indexText(body).text;
+    }
+    return { zip, spine, texts, title: spine.title };
+  }
+
+  // Finds one highlighted text in an opened book. Returns null when it cannot be found.
+  async function locateIn(book, quote, chapter) {
+    const wanted = normalizeQuote(quote);
+    if (!wanted) return null;
+    const candidates = [];
+    let total = 0;
+    for (let i = 0; i < book.texts.length; i++) {
+      const text = book.texts[i];
+      if (!text) continue;
       let from = 0;
       let first = -1;
       for (;;) {
-        const hit = indexed.text.indexOf(wanted, from);
+        const hit = text.indexOf(wanted, from);
         if (hit < 0) break;
         total++;
         if (first < 0) first = hit;
@@ -288,27 +302,36 @@ CrossPoint.registerPlugin(async (container, api) => {
       }
       let approx = false;
       if (first < 0 && wanted.length > 60) {
-        first = indexed.text.indexOf(wanted.slice(0, 60));
+        first = text.indexOf(wanted.slice(0, 60));
         if (first >= 0) { approx = true; total++; }
       }
       if (first < 0) continue;
-      const head = indexed.text.slice(0, 300).toLowerCase();
+      const head = text.slice(0, 300).toLowerCase();
       const titled = !!chapter && head.includes(String(chapter).split(' | ').pop().toLowerCase());
-      candidates.push({ fragment: i + 1, indexed, first, approx, titled });
+      candidates.push({ index: i, first, approx, titled });
       if (titled && !approx) break;
     }
     if (!candidates.length) return null;
     const pick = candidates.find((c) => c.titled) || candidates[0];
-    const last = Math.min(pick.first + wanted.length, pick.indexed.text.length) - 1;
-    const [startNode, startIdx] = pick.indexed.at[pick.first];
-    const [endNode, endIdx] = pick.indexed.at[last];
+    // Only the chapter that matched is read again, to learn which text node each letter is in.
+    const body = parseMarkup(await book.zip.file(book.spine[pick.index]).async('string')).getElementsByTagName('body')[0];
+    const indexed = indexText(body);
+    const last = Math.min(pick.first + wanted.length, indexed.text.length) - 1;
+    const [startNode, startIdx] = indexed.at[pick.first];
+    const [endNode, endIdx] = indexed.at[last];
     const endUnit = (endNode.data.codePointAt(endIdx) || 0) > 0xffff ? 2 : 1;
+    const fragment = pick.index + 1;
     return {
-      pos0: xpointerFor(pick.fragment, startNode, startIdx),
-      pos1: xpointerFor(pick.fragment, endNode, endIdx + endUnit),
-      fragment: pick.fragment, matches: total, approx: pick.approx, byChapter: pick.titled
+      pos0: xpointerFor(fragment, startNode, startIdx),
+      pos1: xpointerFor(fragment, endNode, endIdx + endUnit),
+      fragment, matches: total, approx: pick.approx, byChapter: pick.titled
     };
   }
+
+  const sameTitle = (a, b) => {
+    const n = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+    return !!n(a) && n(a) === n(b);
+  };
 
   async function readText(path) {
     try {
@@ -380,7 +403,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     'for example when you use the long-press or menu Sync progress action. ' +
     'This plugin was made with AI assistance and may contain errors.</p>' +
     '<details id="bo-hl"><summary style="cursor:pointer"><strong>Highlights (experimental)</strong></summary>' +
-    '<p>Sends your most recent highlight from <code>/My Clippings.txt</code> to BookOrbit, as a test. ' +
+    '<p>Sends this book\'s highlights from <code>/My Clippings.txt</code> to BookOrbit. ' +
     'Enter the path of that book\'s EPUB on the SD card. Highlights only sync when the file is ' +
     'identical to the one in BookOrbit. Reading the book file can take a while on the reader.</p>' +
     '<div class="setting-row"><span class="setting-name">Book file</span>' +
@@ -388,8 +411,11 @@ CrossPoint.registerPlugin(async (container, api) => {
     'placeholder="/Books/My Book.epub" style="width:100%"></span></div>' +
     '<div class="setting-row"><span class="setting-control">' +
     '<button type="button" id="bo-hl-check">Check book</button> ' +
-    '<button type="button" id="bo-hl-send">Send latest highlight</button></span></div>' +
-    '<p id="bo-hl-status" style="color:#666"></p></details>' +
+    '<button type="button" id="bo-hl-send">Send highlights</button> ' +
+    '<button type="button" id="bo-hl-pull">Pull highlights</button> ' +
+    '<button type="button" id="bo-hl-save" disabled>Save as text file</button></span></div>' +
+    '<p id="bo-hl-status" style="color:#666"></p>' +
+    '<div id="bo-hl-list"></div></details>' +
     '</details>';
 
   // Show this card first on the Plugins page, above the other plugins.
@@ -557,17 +583,19 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   // ---- Highlights (experimental) ------------------------------------------
-  const PLUGIN_VERSION = 'crosspoint/0.10.0';
+  const PLUGIN_VERSION = 'crosspoint/0.11.0';
 
-  function hlStatus(message, bad, good) {
+  // good = green, bad = red, warn = orange (nothing wrong, but nothing was sent either)
+  function hlStatus(message, bad, good, warn) {
     const el = $('bo-hl-status');
     el.textContent = message;
-    const color = good ? '#3fb950' : bad ? '#ff6b6b' : '#999';
-    el.style.color = color;
-    el.style.border = good || bad ? '1px solid ' + color : '1px solid transparent';
+    const tone = good ? ['#3fb950', 'rgba(63,185,80,0.12)'] : bad ? ['#ff6b6b', 'rgba(255,107,107,0.12)']
+      : warn ? ['#f0a030', 'rgba(240,160,48,0.12)'] : ['#999', 'transparent'];
+    el.style.color = tone[0];
+    el.style.border = '1px solid ' + (good || bad || warn ? tone[0] : 'transparent');
     el.style.borderRadius = '6px';
     el.style.padding = '8px 10px';
-    el.style.background = good ? 'rgba(63,185,80,0.12)' : bad ? 'rgba(255,107,107,0.12)' : 'transparent';
+    el.style.background = tone[1];
   }
 
   let bytesCache = { path: '', bytes: null };
@@ -604,11 +632,61 @@ CrossPoint.registerPlugin(async (container, api) => {
     try {
       const bytes = await bookBytes(path);
       const hash = partialMd5(bytes);
-      let entry = null;
+      let entries = [];
+      let usedLatestBook = '';
       if (send) {
-        const clippings = parseClippings(await readText('/My Clippings.txt'));
-        if (!clippings.length) throw new Error('no highlights found in /My Clippings.txt');
-        entry = clippings[clippings.length - 1];
+        const all = parseClippings(await readText('/My Clippings.txt'));
+        if (!all.length) throw new Error('no highlights found in /My Clippings.txt');
+        let book = null;
+        try {
+          book = await openBook(bytes, (n, of) => hlStatus('Reading the book (' + n + ' of ' + of + ')...'));
+        } catch (e) {
+          book = null;
+        }
+        entries = book && book.title ? all.filter((c) => sameTitle(c.title, book.title)) : [];
+        if (!entries.length) {
+          // The EPUB's title did not match any clipping: use the book highlighted most recently.
+          const latest = all[all.length - 1].title;
+          entries = all.filter((c) => c.title === latest);
+          if (book && book.title) usedLatestBook = latest;
+        }
+        hlStatus('Looking for ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' in the book...');
+        let found = 0;
+        let uncertain = 0;
+        const annotations = [];
+        for (const entry of entries) {
+          let where = null;
+          try { where = book ? await locateIn(book, entry.text, entry.chapter) : null; } catch (e) { where = null; }
+          if (where) { found++; if (where.approx || (where.matches > 1 && !where.byChapter)) uncertain++; }
+          const annotation = {
+            datetime: entry.datetime || nowDatetime(), drawer: 'lighten', text: entry.text.slice(0, 10000),
+            chapter: entry.chapter.slice(0, 500), pageno: entry.page, posFormat: 'xpointer',
+            pos0: where ? where.pos0 : '/body/DocFragment[1]/body/text().0'
+          };
+          if (where) annotation.pos1 = where.pos1;
+          annotations.push(annotation);
+        }
+        hlStatus('Asking BookOrbit...');
+        const r = await postJson('annotations', Object.assign(deviceInfo(), { books: [{ hash, annotations }] }));
+        if (!(r.status >= 200 && r.status < 300) || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
+        if ((r.data.unmatched || []).length) {
+          return hlStatus('BookOrbit does not have this exact file, so the highlights were not stored.', true);
+        }
+        const upserted = ((r.data.results || [])[0] || {}).upserted || 0;
+        const n = annotations.length;
+        const lost = n - found;
+        const already = Math.max(0, n - upserted);
+        if (upserted === 0) {
+          return hlStatus('Nothing new to send: ' + (n === 1 ? 'this highlight is' : 'all ' + n + ' highlights are') +
+            ' already in BookOrbit.', false, false, true);
+        }
+        let msg = 'Sent. ' + upserted + ' new' + (already ? ', ' + already + ' already in BookOrbit' : '') + '. ' +
+          found + ' of ' + n + ' found in the book';
+        if (lost) msg += ', ' + lost + ' could not be found (placeholder position, will show "Anchor lost")';
+        if (uncertain) msg += ', ' + uncertain + ' matched text that appears more than once or only partly, so check ' + (uncertain === 1 ? 'it' : 'them');
+        msg += '.';
+        if (usedLatestBook) msg += ' The book title did not match, so this used the highlights of "' + usedLatestBook + '".';
+        return hlStatus(msg, false, true);
       }
       hlStatus('Asking BookOrbit...');
       if (!send) {
@@ -621,33 +699,6 @@ CrossPoint.registerPlugin(async (container, api) => {
         }
         return hlStatus('BookOrbit has this exact file (hash ' + hash + '). Highlights can sync.', false, true);
       }
-      let where = null;
-      try {
-        where = await locateHighlight(bytes, entry.text, entry.chapter, (n, of) =>
-          hlStatus('Looking for the highlight in the book (' + n + ' of ' + of + ')...'));
-      } catch (e) {
-        where = null;
-      }
-      const annotation = {
-        datetime: entry.datetime || nowDatetime(), drawer: 'lighten', text: entry.text.slice(0, 10000),
-        chapter: entry.chapter.slice(0, 500), pageno: entry.page, posFormat: 'xpointer',
-        pos0: where ? where.pos0 : '/body/DocFragment[1]/body/text().0'
-      };
-      if (where) annotation.pos1 = where.pos1;
-      const r = await postJson('annotations', Object.assign(deviceInfo(), {
-        books: [{ hash, annotations: [annotation] }]
-      }));
-      if (!(r.status >= 200 && r.status < 300) || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
-      if ((r.data.unmatched || []).length) {
-        return hlStatus('BookOrbit does not have this exact file, so the highlight was not stored.', true);
-      }
-      const upserted = ((r.data.results || [])[0] || {}).upserted || 0;
-      const quote = entry.text.length > 70 ? entry.text.slice(0, 70) + '...' : entry.text;
-      const note = !where ? 'Could not find the exact spot in the book, so the position is only a placeholder.'
-        : 'Found it in section ' + where.fragment + (where.approx ? ' (approximately)' : '') +
-          (where.matches > 1 && !where.byChapter ? '; the text appears ' + where.matches + ' times, so check it is the right one' : '') + '.';
-      return hlStatus('Sent. BookOrbit stored ' + upserted + ' highlight (' + quote + '). ' + note,
-        upserted === 0, upserted > 0);
     } catch (e) {
       hlStatus('Could not finish: ' + (e && e.message ? e.message : e), true);
     } finally {
@@ -655,6 +706,125 @@ CrossPoint.registerPlugin(async (container, api) => {
     }
   }
 
+  // ---- pulling highlights made elsewhere (the BookOrbit web reader, other devices) ----------
+  // Uses BookOrbit's annotation exchange as a read: the reader says it has nothing for this copy of
+  // the book, BookOrbit lists what it holds, and each page is acknowledged so the next one follows.
+  // Nothing is written into the reader's own highlight store.
+  let pulled = null;
+  const escapeHtml = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  function safeFileName(text) {
+    return String(text || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90).trim();
+  }
+
+  function highlightsText(info, entries) {
+    const lines = [info.title];
+    if (info.author) lines.push(info.author);
+    lines.push('Highlights from BookOrbit (' + entries.length + ')', '');
+    let chapter = null;
+    for (const e of entries) {
+      const name = e.chapter || '';
+      if (name !== chapter) {
+        chapter = name;
+        if (name) lines.push('== ' + name + ' ==', '');
+      }
+      lines.push((e.pageno ? '[p. ' + e.pageno + '] ' : '') + e.text);
+      if (e.note) lines.push('Note: ' + e.note);
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  function renderPulled() {
+    const list = $('bo-hl-list');
+    if (!pulled) { list.innerHTML = ''; return; }
+    list.innerHTML = pulled.entries.map((e) =>
+      '<div style="border-top:1px solid #555;padding:8px 0">' +
+      '<div style="font-size:12px;color:#999">' + escapeHtml(e.chapter || '') + (e.pageno ? ' · p. ' + escapeHtml(e.pageno) : '') + '</div>' +
+      '<div>' + escapeHtml(e.text) + '</div>' +
+      (e.note ? '<div style="font-size:13px;color:#999">Note: ' + escapeHtml(e.note) + '</div>' : '') + '</div>').join('');
+  }
+
+  async function pullAction() {
+    if (!isConfigured()) return hlStatus('Save the server and login above first.', true);
+    const path = $('bo-book').value.trim();
+    if (!path.startsWith('/')) return hlStatus('Enter the book file path, starting with /.', true);
+    $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = $('bo-hl-save').disabled = true;
+    pulled = null;
+    renderPulled();
+    try {
+      const bytes = await bookBytes(path);
+      const hash = partialMd5(bytes);
+      let title = '';
+      let author = '';
+      try {
+        const spine = await readSpine(await (await ensureJSZip()).loadAsync(bytes));
+        title = spine.title;
+        author = spine.author;
+      } catch (e) { /* not a readable EPUB: the file name is used instead */ }
+      if (!title) title = (path.split('/').pop() || 'Book').replace(/\.[^.]*$/, '');
+      hlStatus('Asking BookOrbit...');
+      const entries = [];
+      let first = true;
+      for (let page = 0; page < 30; page++) {
+        const book = { hash, keys: [], keysComplete: false, sidecarState: first ? 'new' : 'known', changes: [] };
+        const r = await postJson('annotations/exchange', Object.assign(deviceInfo(), { books: [book] }));
+        first = false;
+        if (!(r.status >= 200 && r.status < 300) || !r.data) return hlStatus('BookOrbit answered ' + r.status + '.', true);
+        if ((r.data.unmatched || []).length) return hlStatus('BookOrbit does not have this exact file.', true);
+        if ((r.data.positionIncompatible || []).length) {
+          return hlStatus('BookOrbit has this book, but the file differs from its copy, so highlights will not sync.', true);
+        }
+        const result = (r.data.results || [])[0] || {};
+        const adds = ((result.toApply || {}).add) || [];
+        entries.push(...adds);
+        if (adds.length) {
+          await postJson('annotations/exchange-ack', Object.assign(deviceInfo(), { books: [{
+            hash, deleted: [],
+            applied: adds.map((a) => ({ serverId: a.serverId, version: a.version, status: 'applied' }))
+          }] }));
+        }
+        if (!result.more || !adds.length) break;
+        hlStatus('Asking BookOrbit... (' + entries.length + ' so far)');
+      }
+      entries.sort((x, y) => (x.pageno || 0) - (y.pageno || 0) || String(x.datetime).localeCompare(String(y.datetime)));
+      if (!entries.length) return hlStatus('BookOrbit has no highlights for this book yet.', false, false, true);
+      const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+      const base = safeFileName(title + (author ? ' - ' + author : '')) || 'Book';
+      pulled = { entries, info: { title, author }, file: dir + '/' + base + ' Highlights.txt' };
+      renderPulled();
+      $('bo-hl-save').disabled = false;
+      hlStatus('Got ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' from BookOrbit. ' +
+        'Save as text file writes "' + pulled.file + '" to the reader.', false, true);
+    } catch (e) {
+      hlStatus('Could not finish: ' + (e && e.message ? e.message : e), true);
+    } finally {
+      $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = false;
+      $('bo-hl-save').disabled = !pulled;
+    }
+  }
+
+  async function saveHighlightsFile() {
+    if (!pulled) return hlStatus('Pull the highlights first.', true);
+    try {
+      let text = highlightsText(pulled.info, pulled.entries);
+      let note = '';
+      while (new TextEncoder().encode(text).length > 250 * 1024 && pulled.entries.length > 1) {
+        pulled = Object.assign({}, pulled, { entries: pulled.entries.slice(0, -1) });
+        text = highlightsText(pulled.info, pulled.entries);
+        note = ' The reader accepts about 250 KB, so only the first ' + pulled.entries.length + ' were saved.';
+      }
+      const written = await api.writeFile(pulled.file, b64(text));
+      if (written && written.ok === false) throw new Error(written.error || 'the reader could not write the file');
+      hlStatus('Saved ' + pulled.entries.length + ' highlight' + (pulled.entries.length === 1 ? '' : 's') + ' to ' + pulled.file + '.' + note, false, true);
+    } catch (e) {
+      hlStatus('Could not save: ' + (e && e.message ? e.message : e), true);
+    }
+  }
+
+  $('bo-hl-pull').onclick = pullAction;
+  $('bo-hl-save').onclick = saveHighlightsFile;
   $('bo-hl-check').onclick = () => highlightAction(false);
   $('bo-hl-send').onclick = () => highlightAction(true);
 
