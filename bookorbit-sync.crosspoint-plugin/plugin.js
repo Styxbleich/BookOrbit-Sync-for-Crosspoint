@@ -130,6 +130,186 @@ CrossPoint.registerPlugin(async (container, api) => {
     return out;
   }
 
+  // ---- finding a highlight inside the EPUB (KOReader-style position) --------
+  // BookOrbit needs a position like /body/DocFragment[8]/body/div[2]/p[4]/text()[1].96 to put a
+  // highlight at the right spot in its web reader. CrossPoint does not store that for highlights,
+  // so it is rebuilt here by finding the highlighted text in the book's own chapter files.
+  async function ensureJSZip() {
+    if (typeof JSZip !== 'undefined') return JSZip;
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/js/jszip.min.js';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('could not load the ZIP reader from the reader'));
+      document.head.appendChild(s);
+    });
+    if (typeof JSZip === 'undefined') throw new Error('the ZIP reader did not load');
+    return JSZip;
+  }
+
+  const tagOf = (el) => String(el.localName || el.tagName || '').toLowerCase();
+
+  function parseMarkup(text) {
+    try {
+      const doc = new DOMParser().parseFromString(text, 'application/xhtml+xml');
+      if (doc && !doc.getElementsByTagName('parsererror').length && doc.getElementsByTagName('body').length) return doc;
+    } catch (e) { /* not well-formed XML: fall back to the lenient HTML parser */ }
+    return new DOMParser().parseFromString(text, 'text/html');
+  }
+
+  function joinPath(dir, href) {
+    let rel = href.split('#')[0];
+    try { rel = decodeURIComponent(rel); } catch (e) { /* keep as written */ }
+    const out = [];
+    for (const part of (dir ? dir.split('/') : []).concat(rel.split('/'))) {
+      if (part === '..') out.pop();
+      else if (part && part !== '.') out.push(part);
+    }
+    return out.join('/');
+  }
+
+  // Chapter files in reading order. Position N here is the DocFragment[N] number (1-based).
+  async function readSpine(zip) {
+    const containerFile = zip.file('META-INF/container.xml');
+    if (!containerFile) throw new Error('this is not an EPUB (no META-INF/container.xml)');
+    const container = new DOMParser().parseFromString(await containerFile.async('string'), 'application/xml');
+    const rootfile = container.getElementsByTagName('rootfile')[0];
+    const opfPath = rootfile && rootfile.getAttribute('full-path');
+    const opfFile = opfPath && zip.file(opfPath);
+    if (!opfFile) throw new Error('could not find the EPUB package file');
+    const opf = new DOMParser().parseFromString(await opfFile.async('string'), 'application/xml');
+    const manifest = {};
+    for (const item of Array.from(opf.getElementsByTagName('item'))) manifest[item.getAttribute('id')] = item.getAttribute('href');
+    const dir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/')) : '';
+    return Array.from(opf.getElementsByTagName('itemref')).map((ref) => {
+      const href = manifest[ref.getAttribute('idref')];
+      return href ? joinPath(dir, href) : null;
+    });
+  }
+
+  const SKIP_TAGS = { script: 1, style: 1, head: 1, title: 1 };
+  const BLOCK_TAGS = {
+    p: 1, div: 1, li: 1, ul: 1, ol: 1, h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1, blockquote: 1, section: 1,
+    article: 1, aside: 1, figure: 1, figcaption: 1, tr: 1, td: 1, th: 1, dd: 1, dt: 1, pre: 1, br: 1, hr: 1, body: 1
+  };
+
+  // The visible text of a chapter with whitespace collapsed, and for every character the text
+  // node and position it came from.
+  function indexText(body) {
+    const units = [];
+    const at = [];
+    let blockId = 0;
+    let lastBlock = -1;
+    const space = (node, idx) => { units.push(' '); at.push([node, idx]); };
+    (function walk(el) {
+      for (const child of Array.from(el.childNodes)) {
+        if (child.nodeType === 1) {
+          const name = tagOf(child);
+          if (SKIP_TAGS[name]) continue;
+          const block = !!BLOCK_TAGS[name];
+          if (block) blockId++;
+          walk(child);
+          if (block) blockId++;
+        } else if (child.nodeType === 3) {
+          if (blockId !== lastBlock && units.length && units[units.length - 1] !== ' ') space(child, 0);
+          lastBlock = blockId;
+          let idx = 0;
+          for (const ch of child.data) {
+            if (ch === '­') { idx += ch.length; continue; }
+            if (/\s/.test(ch)) {
+              if (units.length && units[units.length - 1] !== ' ') space(child, idx);
+            } else {
+              for (let u = 0; u < ch.length; u++) { units.push(ch[u]); at.push([child, idx]); }
+            }
+            idx += ch.length;
+          }
+        }
+      }
+    })(body);
+    return { text: units.join(''), at };
+  }
+
+  function normalizeQuote(text) {
+    return String(text || '').replace(/­/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function xpointerFor(fragment, node, utf16Index) {
+    const segments = [];
+    let el = node.parentNode;
+    while (el && tagOf(el) !== 'body') {
+      const name = tagOf(el);
+      let n = 0;
+      for (const sib of Array.from(el.parentNode.childNodes)) {
+        if (sib.nodeType === 1 && tagOf(sib) === name) { n++; if (sib === el) break; }
+      }
+      segments.unshift(name + '[' + n + ']');
+      el = el.parentNode;
+    }
+    // KOReader counts only non-empty text nodes, and drops a whitespace-only first child.
+    let count = 0;
+    let own = 0;
+    Array.from(node.parentNode.childNodes).forEach((c, pos) => {
+      if (c.nodeType !== 3 || !c.data.length) return;
+      if (pos === 0 && /^\s*$/.test(c.data)) return;
+      count++;
+      if (c === node) own = count;
+    });
+    const offset = Array.from(node.data.slice(0, utf16Index)).length;
+    return '/body/DocFragment[' + fragment + ']/body' + (segments.length ? '/' + segments.join('/') : '') +
+      '/text()[' + own + '].' + offset;
+  }
+
+  // Finds the highlighted text in the book. Returns null when it cannot be found.
+  async function locateHighlight(bytes, quote, chapter, progress) {
+    const wanted = normalizeQuote(quote);
+    if (!wanted) return null;
+    const Zip = await ensureJSZip();
+    const zip = await Zip.loadAsync(bytes);
+    const spine = await readSpine(zip);
+    const candidates = [];
+    let total = 0;
+    for (let i = 0; i < spine.length; i++) {
+      if (!spine[i]) continue;
+      const file = zip.file(spine[i]);
+      if (!file) continue;
+      if (progress && i % 10 === 0) progress(i + 1, spine.length);
+      const doc = parseMarkup(await file.async('string'));
+      const body = doc.getElementsByTagName('body')[0];
+      if (!body) continue;
+      const indexed = indexText(body);
+      let from = 0;
+      let first = -1;
+      for (;;) {
+        const hit = indexed.text.indexOf(wanted, from);
+        if (hit < 0) break;
+        total++;
+        if (first < 0) first = hit;
+        from = hit + wanted.length;
+      }
+      let approx = false;
+      if (first < 0 && wanted.length > 60) {
+        first = indexed.text.indexOf(wanted.slice(0, 60));
+        if (first >= 0) { approx = true; total++; }
+      }
+      if (first < 0) continue;
+      const head = indexed.text.slice(0, 300).toLowerCase();
+      const titled = !!chapter && head.includes(String(chapter).split(' | ').pop().toLowerCase());
+      candidates.push({ fragment: i + 1, indexed, first, approx, titled });
+      if (titled && !approx) break;
+    }
+    if (!candidates.length) return null;
+    const pick = candidates.find((c) => c.titled) || candidates[0];
+    const last = Math.min(pick.first + wanted.length, pick.indexed.text.length) - 1;
+    const [startNode, startIdx] = pick.indexed.at[pick.first];
+    const [endNode, endIdx] = pick.indexed.at[last];
+    const endUnit = (endNode.data.codePointAt(endIdx) || 0) > 0xffff ? 2 : 1;
+    return {
+      pos0: xpointerFor(pick.fragment, startNode, startIdx),
+      pos1: xpointerFor(pick.fragment, endNode, endIdx + endUnit),
+      fragment: pick.fragment, matches: total, approx: pick.approx, byChapter: pick.titled
+    };
+  }
+
   async function readText(path) {
     try {
       const response = await fetch('/download?path=' + encodeURIComponent(path));
@@ -378,7 +558,6 @@ CrossPoint.registerPlugin(async (container, api) => {
 
   // ---- Highlights (experimental) ------------------------------------------
   const PLUGIN_VERSION = 'crosspoint/0.10.0';
-  const hashCache = {};
 
   function hlStatus(message, bad, good) {
     const el = $('bo-hl-status');
@@ -391,14 +570,15 @@ CrossPoint.registerPlugin(async (container, api) => {
     el.style.background = good ? 'rgba(63,185,80,0.12)' : bad ? 'rgba(255,107,107,0.12)' : 'transparent';
   }
 
-  async function bookHash(path) {
-    if (hashCache[path]) return hashCache[path];
+  let bytesCache = { path: '', bytes: null };
+  async function bookBytes(path) {
+    if (bytesCache.path === path && bytesCache.bytes) return bytesCache.bytes;
     hlStatus('Reading the book from the reader (this can take a while)...');
     const response = await fetch('/download?path=' + encodeURIComponent(path));
     if (!response.ok) throw new Error('could not read ' + path + ' (check the path)');
-    const hash = partialMd5(new Uint8Array(await response.arrayBuffer()));
-    hashCache[path] = hash;
-    return hash;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    bytesCache = { path, bytes };
+    return bytes;
   }
 
   async function postJson(endpoint, payload) {
@@ -422,7 +602,8 @@ CrossPoint.registerPlugin(async (container, api) => {
     if (!path.startsWith('/')) return hlStatus('Enter the book file path, starting with /.', true);
     $('bo-hl-check').disabled = $('bo-hl-send').disabled = true;
     try {
-      const hash = await bookHash(path);
+      const bytes = await bookBytes(path);
+      const hash = partialMd5(bytes);
       let entry = null;
       if (send) {
         const clippings = parseClippings(await readText('/My Clippings.txt'));
@@ -440,11 +621,19 @@ CrossPoint.registerPlugin(async (container, api) => {
         }
         return hlStatus('BookOrbit has this exact file (hash ' + hash + '). Highlights can sync.', false, true);
       }
+      let where = null;
+      try {
+        where = await locateHighlight(bytes, entry.text, entry.chapter, (n, of) =>
+          hlStatus('Looking for the highlight in the book (' + n + ' of ' + of + ')...'));
+      } catch (e) {
+        where = null;
+      }
       const annotation = {
         datetime: entry.datetime || nowDatetime(), drawer: 'lighten', text: entry.text.slice(0, 10000),
         chapter: entry.chapter.slice(0, 500), pageno: entry.page, posFormat: 'xpointer',
-        pos0: '/body/DocFragment[1]/body/text().0'
+        pos0: where ? where.pos0 : '/body/DocFragment[1]/body/text().0'
       };
+      if (where) annotation.pos1 = where.pos1;
       const r = await postJson('annotations', Object.assign(deviceInfo(), {
         books: [{ hash, annotations: [annotation] }]
       }));
@@ -454,8 +643,11 @@ CrossPoint.registerPlugin(async (container, api) => {
       }
       const upserted = ((r.data.results || [])[0] || {}).upserted || 0;
       const quote = entry.text.length > 70 ? entry.text.slice(0, 70) + '...' : entry.text;
-      return hlStatus('Sent. BookOrbit stored ' + upserted + ' highlight (' + quote +
-        '). Check the book in BookOrbit. The position is approximate.', upserted === 0, upserted > 0);
+      const note = !where ? 'Could not find the exact spot in the book, so the position is only a placeholder.'
+        : 'Found it in section ' + where.fragment + (where.approx ? ' (approximately)' : '') +
+          (where.matches > 1 && !where.byChapter ? '; the text appears ' + where.matches + ' times, so check it is the right one' : '') + '.';
+      return hlStatus('Sent. BookOrbit stored ' + upserted + ' highlight (' + quote + '). ' + note,
+        upserted === 0, upserted > 0);
     } catch (e) {
       hlStatus('Could not finish: ' + (e && e.message ? e.message : e), true);
     } finally {

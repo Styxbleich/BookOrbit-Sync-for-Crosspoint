@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import JSZip from 'jszip';
+import { DOMParser } from 'linkedom';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(here, '..', 'bookorbit-sync.crosspoint-plugin', 'plugin.js'), 'utf8');
@@ -20,7 +22,7 @@ async function load({ existing = null, device = null, events = null, relay, file
   const relays = [];
   let register;
   const sandbox = {
-    document, TextEncoder, btoa, console,
+    document, TextEncoder, btoa, console, JSZip, DOMParser, Uint8Array, // same realm as JSZip, as in a browser
     CrossPoint: { registerPlugin: (fn) => { register = fn; } },
     fetch: async (url) => {
       const asked = url.startsWith('/download?path=') ? decodeURIComponent(url.slice('/download?path='.length)) : null;
@@ -390,4 +392,101 @@ test('highlights: BookOrbit answers POSTs with 201 Created, which counts as succ
   assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
   await els['bo-hl-send'].onclick();
   assert.match(els['bo-hl-status'].textContent, /^Sent\./);
+});
+
+
+// ---- Locating a highlight inside the EPUB -----------------------------------
+const XHTML = (title, body) => '<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml">' +
+  '<head><title>' + title + '</title><style>p{}</style></head><body>' + body + '</body></html>';
+
+async function makeEpub(chapters) {
+  const zip = new JSZip();
+  zip.file('mimetype', 'application/epub+zip');
+  zip.file('META-INF/container.xml', '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">' +
+    '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+  const items = chapters.map((c, i) => '<item id="c' + i + '" href="text/' + c.name + '" media-type="application/xhtml+xml"/>').join('');
+  const refs = chapters.map((c, i) => '<itemref idref="c' + i + '"/>').join('');
+  zip.file('OEBPS/content.opf', '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">' +
+    '<manifest>' + items + '</manifest><spine>' + refs + '</spine></package>');
+  for (const c of chapters) zip.file('OEBPS/text/' + c.name, c.xhtml);
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+// Follows a KOReader-style position through the real chapter markup, like a reader would.
+function resolveXPointer(xhtml, xp) {
+  const m = /^\/body\/DocFragment\[(\d+)\]\/body((?:\/[a-z0-9]+\[\d+\])*)\/text\(\)\[(\d+)\]\.(\d+)$/.exec(xp);
+  assert.ok(m, 'unexpected position format: ' + xp);
+  const doc = new DOMParser().parseFromString(xhtml, 'application/xhtml+xml');
+  let el = doc.getElementsByTagName('body')[0];
+  for (const seg of m[2].split('/').filter(Boolean)) {
+    const [, name, n] = /^([a-z0-9]+)\[(\d+)\]$/.exec(seg);
+    el = Array.from(el.childNodes).filter((c) => c.nodeType === 1 && c.localName === name)[Number(n) - 1];
+    assert.ok(el, 'no element for ' + seg);
+  }
+  const texts = Array.from(el.childNodes).filter((c, pos) => c.nodeType === 3 && c.data.length && !(pos === 0 && /^\s*$/.test(c.data)));
+  const node = texts[Number(m[3]) - 1];
+  assert.ok(node, 'no text node ' + m[3]);
+  return Array.from(node.data).slice(Number(m[4])).join('');
+}
+
+const CH_ONE = XHTML('One', '<h1>Chapter One</h1><p>Opening words.</p>');
+const CH_TWO = XHTML('Two', '<h1>Chapter Two</h1><div class="a"><p>First para.</p>' +
+  '<p>We ended up <i>hiring</i> five mercenaries. Then more text.</p></div>');
+const CH_THREE = XHTML('Three', '<h1>Chapter Three</h1><section><p>Unrelated.</p><p>We ended up hiring five mercenaries.</p></section>' +
+  '<p>caf\u00e9 \ud83d\ude00   na\u00efve\n   line end</p>');
+
+async function sendFor(quote, chapter, chapters) {
+  const epub = await makeEpub(chapters);
+  const clip = 'Book (Auth)\n- Your Highlight on Page 3 | ' + chapter + ' | Added on Tuesday, November 3, 2026, 04:12 PM\n\n' + quote + '\n==========\n';
+  const { els, relays } = await load({
+    existing: CONFIG, files: { '/b.epub': epub, '/My Clippings.txt': clip },
+    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+  });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-send'].onclick();
+  const body = JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body);
+  return { a: body.books[0].annotations[0], status: els['bo-hl-status'].textContent };
+}
+
+const CHAPTERS = [{ name: 'one.xhtml', xhtml: CH_ONE }, { name: 'two.xhtml', xhtml: CH_TWO }, { name: 'three.xhtml', xhtml: CH_THREE }];
+
+test('highlight position: text spanning inline markup gets exact start and end positions', async () => {
+  const { a, status } = await sendFor('We ended up hiring five mercenaries.', 'Chapter Two', CHAPTERS.slice(0, 2));
+  assert.equal(a.pos0, '/body/DocFragment[2]/body/div[1]/p[2]/text()[1].0');
+  assert.equal(a.pos1, '/body/DocFragment[2]/body/div[1]/p[2]/text()[2].18');
+  assert.equal(resolveXPointer(CH_TWO, a.pos0).slice(0, 12), 'We ended up ');
+  assert.match(status, /Found it in section 2/);
+  assert.doesNotMatch(status, /appears/);
+});
+
+test('highlight position: a repeated quote prefers the chapter named in the clipping', async () => {
+  const two = await sendFor('We ended up hiring five mercenaries.', 'Chapter Two', CHAPTERS);
+  assert.match(two.a.pos0, /^\/body\/DocFragment\[2\]\//);
+  assert.doesNotMatch(two.status, /appears/);
+  const three = await sendFor('We ended up hiring five mercenaries.', 'Chapter Three', CHAPTERS);
+  assert.equal(three.a.pos0, '/body/DocFragment[3]/body/section[1]/p[2]/text()[1].0');
+  assert.equal(resolveXPointer(CH_THREE, three.a.pos0), 'We ended up hiring five mercenaries.');
+  assert.doesNotMatch(three.status, /appears/);
+  // no chapter to go by: take the first one and warn that the text repeats
+  const unknown = await sendFor('We ended up hiring five mercenaries.', 'Some other title', CHAPTERS);
+  assert.match(unknown.a.pos0, /^\/body\/DocFragment\[2\]\//);
+  assert.match(unknown.status, /appears 2 times/);
+});
+
+test('highlight position: whitespace, accents and emoji (UTF-16 pairs) are handled', async () => {
+  const { a } = await sendFor('caf\u00e9 \ud83d\ude00 na\u00efve line', 'Chapter Three', CHAPTERS);
+  assert.equal(a.pos0, '/body/DocFragment[3]/body/p[1]/text()[1].0');
+  assert.match(resolveXPointer(CH_THREE, a.pos0), /^caf\u00e9 \ud83d\ude00/);
+  assert.match(a.pos1, /text\(\)\[1\]\.\d+$/);
+  // end is in codepoints: "café 😀   naïve\n   line" up to and including "line" is 4+1+1+1... check against the source text
+  const endOffset = Number(/\.(\d+)$/.exec(a.pos1)[1]);
+  const src = 'caf\u00e9 \ud83d\ude00   na\u00efve\n   line end';
+  assert.equal(Array.from(src).slice(0, endOffset).join('').trimEnd().endsWith('line'), true);
+});
+
+test('highlight position: text that is not in the book falls back to a placeholder and says so', async () => {
+  const { a, status } = await sendFor('A sentence the book does not contain.', 'Chapter Two', CHAPTERS);
+  assert.equal(a.pos0, '/body/DocFragment[1]/body/text().0');
+  assert.equal(a.pos1, undefined);
+  assert.match(status, /placeholder/);
 });

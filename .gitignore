@@ -2,3 +2,4 @@ __pycache__/
 *.db
 # a real config holds your BookOrbit credentials; never commit it
 config.json
+node_modules/
