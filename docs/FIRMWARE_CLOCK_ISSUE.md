@@ -6,6 +6,8 @@
 > but the explanation of *why* it happens is a **hypothesis** that has not been
 > confirmed with serial logs. Edit it before posting.
 
+> **Update (Nov 2026):** the X4 Pro that first showed this behavior has since been stamping sessions with correct times, with no firmware change. The original observation stands as recorded below, but the problem may be transient or specific to one unit, so treat the suspected cause as unconfirmed.
+
 ## Summary
 
 On an Xteink X4 Pro, `reader.session` events (and `{event.ts}`) carried times that were
