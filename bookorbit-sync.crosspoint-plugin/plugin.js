@@ -404,11 +404,11 @@ CrossPoint.registerPlugin(async (container, api) => {
     'This plugin was made with AI assistance and may contain errors.</p>' +
     '<details id="bo-hl"><summary style="cursor:pointer"><strong>Highlights (experimental)</strong></summary>' +
     '<p>Sends this book\'s highlights from <code>/My Clippings.txt</code> to BookOrbit. ' +
-    'Enter the path of that book\'s EPUB on the SD card. Highlights only sync when the file is ' +
+    'Pick the book below. Highlights only sync when the file is ' +
     'identical to the one in BookOrbit. Reading the book file can take a while on the reader.</p>' +
     '<div class="setting-row" id="bo-recent-row" style="display:none"><span class="setting-name">Recent books</span>' +
     '<span class="setting-control"><select id="bo-recent" style="width:100%"></select></span></div>' +
-    '<div class="setting-row"><span class="setting-name">Book file</span>' +
+    '<div class="setting-row" id="bo-book-row"><span class="setting-name">Book file</span>' +
     '<span class="setting-control"><input type="text" id="bo-book" autocomplete="off" ' +
     'placeholder="/Books/My Book.epub" style="width:100%"></span></div>' +
     '<div class="setting-row"><span class="setting-control">' +
@@ -585,7 +585,7 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   // ---- Highlights (experimental) ------------------------------------------
-  const PLUGIN_VERSION = 'crosspoint/0.11.1';
+  const PLUGIN_VERSION = 'crosspoint/0.11.2';
 
   // good = green, bad = red, warn = orange (nothing wrong, but nothing was sent either)
   function hlStatus(message, bad, good, warn) {
@@ -827,6 +827,7 @@ CrossPoint.registerPlugin(async (container, api) => {
 
   // The reader remembers the books you opened last in /.crosspoint/recent.json (up to 10, finished
   // books drop off). Offering them saves typing a path. The path box stays for anything else.
+  const OTHER_BOOK = '__other__';
   async function loadRecentBooks() {
     let books = [];
     try {
@@ -834,11 +835,18 @@ CrossPoint.registerPlugin(async (container, api) => {
       books = (doc && doc.books || []).filter((b) => b && /\.epub$/i.test(String(b.path || '')));
     } catch (e) { books = []; }
     if (!books.length) return;
-    $('bo-recent').innerHTML = '<option value="">Choose a recent book...</option>' + books.map((b) =>
-      '<option value="' + escapeHtml(b.path) + '">' + escapeHtml((b.title || b.path.split('/').pop()) + (b.author ? ' - ' + b.author : '')) + '</option>').join('');
+    $('bo-recent').innerHTML = books.map((b) =>
+      '<option value="' + escapeHtml(b.path) + '">' + escapeHtml((b.title || b.path.split('/').pop()) + (b.author ? ' - ' + b.author : '')) + '</option>').join('') +
+      '<option value="' + OTHER_BOOK + '">Another book (type its path)...</option>';
     $('bo-recent-row').style.display = '';
-    $('bo-recent').onchange = () => { if ($('bo-recent').value) $('bo-book').value = $('bo-recent').value; };
-    if (!$('bo-book').value) { $('bo-book').value = books[0].path; $('bo-recent').value = books[0].path; }
+    const choose = () => {
+      const value = $('bo-recent').value;
+      if (value === OTHER_BOOK) { $('bo-book-row').style.display = ''; $('bo-book').value = ''; return; }
+      $('bo-book').value = value;
+      $('bo-book-row').style.display = 'none';
+    };
+    $('bo-recent').onchange = choose;
+    if (!$('bo-book').value) { $('bo-recent').value = books[0].path; choose(); }
   }
   await loadRecentBooks();
 

@@ -641,21 +641,24 @@ const RECENT = JSON.stringify({ books: [
   { path: '/Books/B & B.EPUB', title: '<i>B</i> & B', author: '', coverBmpPath: '' }
 ] });
 
-test('recent books: the reader\'s recent list fills a dropdown and the newest book is preselected', async () => {
+test('recent books: the reader\'s recent list fills a dropdown, the newest is chosen and the path box is hidden', async () => {
   const { els } = await load({ existing: CONFIG, files: { '/.crosspoint/recent.json': RECENT }, relay: async () => ({ status: 200, body: '{}' }) });
   const html = els['bo-recent'].innerHTML;
-  assert.match(html, /Choose a recent book/);
-  assert.match(html, /The Butcher’s Masquerade - Matt Dinniman/);
+  assert.match(html, /The Butcher\u2019s Masquerade - Matt Dinniman/);
   assert.doesNotMatch(html, /notes\.txt/, 'only EPUBs are offered');
   assert.match(html, /&lt;i&gt;B&lt;\/i&gt; &amp; B/, 'titles are escaped');
+  assert.match(html, /Another book/);
   assert.equal(els['bo-recent-row'].style.display, '');
-  assert.equal(els['bo-book'].value, '/Books/Dinniman, Matt/The Butcher’s Masquerade.epub');
+  assert.equal(els['bo-book-row'].style.display, 'none');
+  assert.equal(els['bo-book'].value, '/Books/Dinniman, Matt/The Butcher\u2019s Masquerade.epub');
   els['bo-recent'].value = '/Books/B & B.EPUB';
   els['bo-recent'].onchange();
   assert.equal(els['bo-book'].value, '/Books/B & B.EPUB');
-  els['bo-recent'].value = '';
+  assert.equal(els['bo-book-row'].style.display, 'none');
+  els['bo-recent'].value = '__other__';
   els['bo-recent'].onchange();
-  assert.equal(els['bo-book'].value, '/Books/B & B.EPUB', 'choosing the prompt leaves the path alone');
+  assert.equal(els['bo-book-row'].style.display, '', 'the path box appears for another book');
+  assert.equal(els['bo-book'].value, '');
 });
 
 test('recent books: no list, a broken list or no EPUBs leaves the path box as it was', async () => {
@@ -663,5 +666,6 @@ test('recent books: no list, a broken list or no EPUBs leaves the path box as it
     const { els } = await load({ existing: CONFIG, files, relay: async () => ({ status: 200, body: '{}' }) });
     assert.equal(els['bo-book'].value, '');
     assert.notEqual(els['bo-recent-row'] && els['bo-recent-row'].style.display, '');
+    assert.notEqual(els['bo-book-row'] && els['bo-book-row'].style.display, 'none', 'the path box stays visible without a list');
   }
 });
