@@ -1,0 +1,9 @@
+{
+  "name": "bookorbit-sync-tests",
+  "private": true,
+  "description": "Development-only dependencies for the settings page tests. Not part of the plugin.",
+  "devDependencies": {
+    "jszip": "3.10.1",
+    "linkedom": "0.18.5"
+  }
+}
