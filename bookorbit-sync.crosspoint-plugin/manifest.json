@@ -2,7 +2,7 @@
   "name": "bookorbit-sync",
   "title": "BookOrbit Sync",
   "description": "Sends your reading sessions to BookOrbit",
-  "version": "0.11.2",
+  "version": "0.11.4",
   "mount": "settings",
   "files": ["manifest.json", "device.json", "plugin.js", "config.example.json", "README.md"]
 }

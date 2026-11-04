@@ -328,6 +328,14 @@ CrossPoint.registerPlugin(async (container, api) => {
     };
   }
 
+  // The titles a book may go by in /My Clippings.txt: the one inside the EPUB and the one the reader
+  // keeps in its recent-books list.
+  async function bookTitles(bytes, path) {
+    let epubTitle = '';
+    try { epubTitle = (await readSpine(await (await ensureJSZip()).loadAsync(bytes))).title; } catch (e) { epubTitle = ''; }
+    return [epubTitle, recentTitles[path]].filter(Boolean);
+  }
+
   const sameTitle = (a, b) => {
     const n = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
     return !!n(a) && n(a) === n(b);
@@ -371,11 +379,13 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   const $ = (id) => document.getElementById(id);
+  const PLUGIN_VERSION = 'crosspoint/0.11.4';
 
   container.innerHTML =
     '<details id="bo-panel"><summary style="cursor:pointer">' +
     '<h2 style="display:inline-block;margin:0">BookOrbit Reading Log</h2> ' +
     '<span id="bo-state" style="color:#666;font-size:0.9em"></span></summary>' +
+    '<p id="bo-version" style="color:#666;font-size:0.9em;margin:12px 0 16px">Version: v' + PLUGIN_VERSION.split('/')[1] + '</p>' +
     '<p>Sends your reading sessions to BookOrbit. Use the KOReader sync login ' +
     'from BookOrbit (Settings &gt; Devices &amp; Sync &gt; KOReader).</p>' +
     '<div class="setting-row"><span class="setting-name">Server URL</span>' +
@@ -585,7 +595,6 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   // ---- Highlights (experimental) ------------------------------------------
-  const PLUGIN_VERSION = 'crosspoint/0.11.2';
 
   // good = green, bad = red, warn = orange (nothing wrong, but nothing was sent either)
   function hlStatus(message, bad, good, warn) {
@@ -631,11 +640,11 @@ CrossPoint.registerPlugin(async (container, api) => {
     const path = $('bo-book').value.trim();
     if (!path.startsWith('/')) return hlStatus('Enter the book file path, starting with /.', true);
     $('bo-hl-check').disabled = $('bo-hl-send').disabled = true;
+    clearList();
     try {
       const bytes = await bookBytes(path);
       const hash = partialMd5(bytes);
       let entries = [];
-      let usedLatestBook = '';
       if (send) {
         const all = parseClippings(await readText('/My Clippings.txt'));
         if (!all.length) throw new Error('no highlights found in /My Clippings.txt');
@@ -645,12 +654,17 @@ CrossPoint.registerPlugin(async (container, api) => {
         } catch (e) {
           book = null;
         }
-        entries = book && book.title ? all.filter((c) => sameTitle(c.title, book.title)) : [];
+        // Only highlights whose book title matches this book are sent. The title is read from the EPUB
+        // and from the reader's recent-books list, which is where the reader got the title it wrote
+        // into /My Clippings.txt. If neither matches, nothing is sent: guessing would attach one
+        // book's highlights to another.
+        const titles = [book && book.title, recentTitles[path]].filter(Boolean);
+        entries = all.filter((c) => titles.some((t) => sameTitle(c.title, t)));
         if (!entries.length) {
-          // The EPUB's title did not match any clipping: use the book highlighted most recently.
-          const latest = all[all.length - 1].title;
-          entries = all.filter((c) => c.title === latest);
-          if (book && book.title) usedLatestBook = latest;
+          return hlStatus(titles.length
+            ? 'No highlights for "' + titles[0] + '" were found in /My Clippings.txt, so nothing was sent.'
+            : 'Could not tell which highlights belong to this book (it has no title), so nothing was sent.',
+          false, false, true);
         }
         hlStatus('Looking for ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' in the book...');
         let found = 0;
@@ -687,7 +701,6 @@ CrossPoint.registerPlugin(async (container, api) => {
         if (lost) msg += ', ' + lost + ' could not be found (placeholder position, will show "Anchor lost")';
         if (uncertain) msg += ', ' + uncertain + ' matched text that appears more than once or only partly, so check ' + (uncertain === 1 ? 'it' : 'them');
         msg += '.';
-        if (usedLatestBook) msg += ' The book title did not match, so this used the highlights of "' + usedLatestBook + '".';
         return hlStatus(msg, false, true);
       }
       hlStatus('Asking BookOrbit...');
@@ -698,6 +711,18 @@ CrossPoint.registerPlugin(async (container, api) => {
         if (!match) return hlStatus('BookOrbit does not have this exact file (hash ' + hash + ').', true);
         if (match.positionCompatible === false) {
           return hlStatus('BookOrbit has this book, but the file differs from its copy, so highlights will not sync.', true);
+        }
+        // Show what the reader has for this book, so it can be looked over before pressing Send.
+        let mine = [];
+        try {
+          const titles = await bookTitles(bytes, path);
+          mine = parseClippings(await readText('/My Clippings.txt')).filter((c) => titles.some((t) => sameTitle(c.title, t)));
+        } catch (e) { mine = []; }
+        if (mine.length) {
+          showList('On the reader (' + mine.length + '). Press Send highlights to send them to BookOrbit.',
+            mine.map((c) => ({ chapter: c.chapter, page: c.page, text: c.text })));
+        } else {
+          showList('No highlights for this book were found on the reader yet.', []);
         }
         return hlStatus('BookOrbit has this exact file (hash ' + hash + '). Highlights can sync.', false, true);
       }
@@ -738,14 +763,27 @@ CrossPoint.registerPlugin(async (container, api) => {
     return lines.join('\n');
   }
 
-  function renderPulled() {
+  // header: a line above the list; items: { chapter, page, text, note }
+  function showList(header, items) {
     const list = $('bo-hl-list');
-    if (!pulled) { list.innerHTML = ''; return; }
-    list.innerHTML = pulled.entries.map((e) =>
-      '<div style="border-top:1px solid #555;padding:8px 0">' +
-      '<div style="font-size:12px;color:#999">' + escapeHtml(e.chapter || '') + (e.pageno ? ' · p. ' + escapeHtml(e.pageno) : '') + '</div>' +
-      '<div>' + escapeHtml(e.text) + '</div>' +
-      (e.note ? '<div style="font-size:13px;color:#999">Note: ' + escapeHtml(e.note) + '</div>' : '') + '</div>').join('');
+    list.innerHTML = (header ? '<p style="color:#999;margin:12px 0 4px">' + escapeHtml(header) + '</p>' : '') +
+      items.map((e) =>
+        '<div style="border-top:1px solid #555;padding:8px 0">' +
+        '<div style="font-size:12px;color:#999">' + escapeHtml(e.chapter || '') + (e.page ? ' \u00b7 p. ' + escapeHtml(e.page) : '') + '</div>' +
+        '<div>' + escapeHtml(e.text) + '</div>' +
+        (e.note ? '<div style="font-size:13px;color:#999">Note: ' + escapeHtml(e.note) + '</div>' : '') + '</div>').join('');
+  }
+
+  // Any button other than "Save as text file" clears what was listed before.
+  function clearList() {
+    pulled = null;
+    $('bo-hl-list').innerHTML = '';
+    $('bo-hl-save').disabled = true;
+  }
+
+  function renderPulled() {
+    if (!pulled) return clearList();
+    showList('', pulled.entries.map((e) => ({ chapter: e.chapter, page: e.pageno, text: e.text, note: e.note })));
   }
 
   async function pullAction() {
@@ -753,8 +791,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     const path = $('bo-book').value.trim();
     if (!path.startsWith('/')) return hlStatus('Enter the book file path, starting with /.', true);
     $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = $('bo-hl-save').disabled = true;
-    pulled = null;
-    renderPulled();
+    clearList();
     try {
       const bytes = await bookBytes(path);
       const hash = partialMd5(bytes);
@@ -828,6 +865,7 @@ CrossPoint.registerPlugin(async (container, api) => {
   // The reader remembers the books you opened last in /.crosspoint/recent.json (up to 10, finished
   // books drop off). Offering them saves typing a path. The path box stays for anything else.
   const OTHER_BOOK = '__other__';
+  const recentTitles = {};
   async function loadRecentBooks() {
     let books = [];
     try {
@@ -835,11 +873,13 @@ CrossPoint.registerPlugin(async (container, api) => {
       books = (doc && doc.books || []).filter((b) => b && /\.epub$/i.test(String(b.path || '')));
     } catch (e) { books = []; }
     if (!books.length) return;
+    for (const b of books) if (b.title) recentTitles[b.path] = b.title;
     $('bo-recent').innerHTML = books.map((b) =>
       '<option value="' + escapeHtml(b.path) + '">' + escapeHtml((b.title || b.path.split('/').pop()) + (b.author ? ' - ' + b.author : '')) + '</option>').join('') +
       '<option value="' + OTHER_BOOK + '">Another book (type its path)...</option>';
     $('bo-recent-row').style.display = '';
     const choose = () => {
+      clearList();
       const value = $('bo-recent').value;
       if (value === OTHER_BOOK) { $('bo-book-row').style.display = ''; $('bo-book').value = ''; return; }
       $('bo-book').value = value;

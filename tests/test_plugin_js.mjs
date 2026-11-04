@@ -272,6 +272,7 @@ test('the card no longer has hold, time source or queue controls', async () => {
 
 // ---- Highlights (experimental) ---------------------------------------------
 const CONFIG = JSON.stringify({ server: 'http://h:1', user: 'u', key: 'k', device_id: 'x4pro' });
+const rec = (p, title) => JSON.stringify({ books: [{ path: p, title, author: '', coverBmpPath: '' }] });
 const CLIPS = [
   'Dune (Frank Herbert)\n- Your Highlight on Page 12 | Book One | Added on Monday, November 2, 2026, 09:05 AM\n\nFirst quote\n==========\n',
   'Dune (Frank Herbert)\n- Your Highlight on Page 40 | Part 2 | The Gom Jabbar | Added on Tuesday, November 3, 2026, 04:12 PM\n\nFear is the mind-killer.\nSecond line.\n==========\n'
@@ -305,7 +306,7 @@ test('highlights: book hash matches KOReader partial md5 for many sizes', async 
 test('highlights: sends the book\'s highlights with hash, page, chapter and time', async () => {
   const epub = crypto.randomBytes(30000);
   const { els, relays } = await load({
-    existing: CONFIG, files: { '/Books/b.epub': epub, '/My Clippings.txt': CLIPS },
+    existing: CONFIG, files: { '/Books/b.epub': epub, '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/Books/b.epub', 'Dune') },
     relay: async () => ({ status: 200, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
   });
   els['bo-book'].value = '/Books/b.epub';
@@ -338,7 +339,7 @@ test('highlights: 12 AM / 12 PM and a missing "Added on" are handled', async () 
     [mk(''), /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/]
   ]) {
     const { els, relays } = await load({
-      existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': clip },
+      existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': clip, '/.crosspoint/recent.json': rec('/b.epub', 'B') },
       relay: async () => ({ status: 200, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
     });
     els['bo-book'].value = '/b.epub';
@@ -355,8 +356,8 @@ test('highlights: clear messages for the failure cases', async () => {
     [{ existing: CONFIG, files: {}, relay: async () => ok }, 'b.epub', /starting with \//],
     [{ existing: CONFIG, files: {}, relay: async () => ok }, '/nope.epub', /could not read \/nope\.epub/],
     [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a') }, relay: async () => ok }, '/b.epub', /no highlights found/],
-    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS }, relay: async () => ok }, '/b.epub', /does not have this exact file/],
-    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS }, relay: async () => ({ status: 401, body: '' }) }, '/b.epub', /answered 401/]
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') }, relay: async () => ok }, '/b.epub', /does not have this exact file/],
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') }, relay: async () => ({ status: 401, body: '' }) }, '/b.epub', /answered 401/]
   ];
   for (const [opts, bookPath, re] of cases) {
     const { els } = await load(opts);
@@ -383,7 +384,7 @@ test('highlights: check book reports a differing copy and an unknown file', asyn
 
 test('highlights: BookOrbit answers POSTs with 201 Created, which counts as success', async () => {
   const { els } = await load({
-    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS },
+    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
     relay: async (m, u) => ({ status: 201, body: JSON.stringify(u.endsWith('/annotations')
       ? { results: [{ hash: 'h', upserted: 1 }], unmatched: [] }
       : { matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }], libraryVersion: 'v' }) })
@@ -440,7 +441,7 @@ async function sendFor(quote, chapter, chapters) {
   const epub = await makeEpub(chapters);
   const clip = 'Book (Auth)\n- Your Highlight on Page 3 | ' + chapter + ' | Added on Tuesday, November 3, 2026, 04:12 PM\n\n' + quote + '\n==========\n';
   const { els, relays } = await load({
-    existing: CONFIG, files: { '/b.epub': epub, '/My Clippings.txt': clip },
+    existing: CONFIG, files: { '/b.epub': epub, '/My Clippings.txt': clip, '/.crosspoint/recent.json': rec('/b.epub', 'Book') },
     relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
   });
   els['bo-book'].value = '/b.epub';
@@ -525,27 +526,44 @@ test('highlights: every highlight of the book is sent in one request, other book
   assert.doesNotMatch(msg, /did not match/);
 });
 
-test('highlights: when the book title matches nothing, the most recently highlighted book is used and says so', async () => {
-  const plain = await JSZip.loadAsync(await makeEpub(CHAPTERS));
-  const opf = await plain.file('OEBPS/content.opf').async('string');
-  plain.file('OEBPS/content.opf', opf.replace('<manifest>', '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Some Other Title</dc:title></metadata><manifest>'));
-  const epub = await plain.generateAsync({ type: 'nodebuffer' });
-  const clips = 'Old Book (A)\n- Your Highlight on Page 1 | C | Added on Monday, November 2, 2026, 09:05 AM\n\nOpening words.\n==========\n' +
-    'New Book (A)\n- Your Highlight on Page 1 | Chapter One | Added on Tuesday, November 3, 2026, 04:12 PM\n\nOpening words.\n==========\n';
+test('highlights: a book with no highlights of its own sends nothing, even when other books have highlights', async () => {
+  const withTitle = async (title) => {
+    const plain = await JSZip.loadAsync(await makeEpub(CHAPTERS));
+    const opf = await plain.file('OEBPS/content.opf').async('string');
+    plain.file('OEBPS/content.opf', opf.replace('<manifest>', '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>' + title + '</dc:title></metadata><manifest>'));
+    return plain.generateAsync({ type: 'nodebuffer' });
+  };
+  const clips = 'Other Book (A)\n- Your Highlight on Page 1 | Chapter One | Added on Tuesday, November 3, 2026, 04:12 PM\n\nOpening words.\n==========\n';
+  for (const files of [
+    { '/b.epub': await withTitle('Some Other Title'), '/My Clippings.txt': clips },               // title from the EPUB
+    { '/b.epub': Buffer.from('not an epub'), '/My Clippings.txt': clips, '/.crosspoint/recent.json': rec('/b.epub', 'The Gate') }, // title from the recent list
+    { '/b.epub': Buffer.from('not an epub'), '/My Clippings.txt': clips }                         // no title at all
+  ]) {
+    const { els, relays } = await load({ existing: CONFIG, files, relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) }) });
+    els['bo-book'].value = '/b.epub';
+    await els['bo-hl-send'].onclick();
+    assert.equal(relays.filter((r) => r.u.endsWith('/annotations')).length, 0, 'nothing is sent');
+    assert.match(els['bo-hl-status'].textContent, /nothing was sent/);
+    assert.equal(els['bo-hl-status'].style.color, '#f0a030');
+  }
+});
+
+test('highlights: the title from the recent list finds highlights when the EPUB has no title', async () => {
+  const clips = 'My Book (A)\n- Your Highlight on Page 1 | Chapter One | Added on Tuesday, November 3, 2026, 04:12 PM\n\nOpening words.\n==========\n' +
+    'Another (A)\n- Your Highlight on Page 2 | X | Added on Tuesday, November 3, 2026, 04:13 PM\n\nSomething else.\n==========\n';
   const { els, relays } = await load({
-    existing: CONFIG, files: { '/b.epub': epub, '/My Clippings.txt': clips },
+    existing: CONFIG, files: { '/b.epub': await makeEpub(CHAPTERS), '/My Clippings.txt': clips, '/.crosspoint/recent.json': rec('/b.epub', 'My Book') },
     relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
   });
   els['bo-book'].value = '/b.epub';
   await els['bo-hl-send'].onclick();
   const anns = JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body).books[0].annotations;
-  assert.equal(anns.length, 1);
-  assert.match(els['bo-hl-status'].textContent, /used the highlights of "New Book"/);
+  assert.deepEqual(anns.map((a) => a.text), ['Opening words.']);
 });
 
 test('highlights: when everything is already in BookOrbit the box is orange, not red', async () => {
   const { els } = await load({
-    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS },
+    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
     relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 0 }], unmatched: [] }) })
   });
   els['bo-book'].value = '/b.epub';
@@ -668,4 +686,67 @@ test('recent books: no list, a broken list or no EPUBs leaves the path box as it
     assert.notEqual(els['bo-recent-row'] && els['bo-recent-row'].style.display, '');
     assert.notEqual(els['bo-book-row'] && els['bo-book-row'].style.display, 'none', 'the path box stays visible without a list');
   }
+});
+
+// ---- Version line, check-then-send, clearing the list ---------------------------
+test('the expanded card shows the plugin version under the header, matching the manifest', async () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(here, '..', 'bookorbit-sync.crosspoint-plugin', 'manifest.json'), 'utf8'));
+  const { container } = await load({ existing: CONFIG, relay: async () => ({ status: 200, body: '{}' }) });
+  const html = container.innerHTML;
+  const header = html.indexOf('</summary>');
+  const version = html.indexOf('Version: v' + manifest.version + '<');
+  assert.ok(version > header, 'the version sits inside the expanded part, after the header');
+  assert.ok(version < html.indexOf('Sends your reading sessions'), 'and above the description');
+});
+
+test('check book lists the highlights the reader has for that book, ready to send', async () => {
+  const clips = 'Dune (Frank Herbert)\n- Your Highlight on Page 12 | Book One | Added on Monday, November 2, 2026, 09:05 AM\n\nFirst <quote>\n==========\n' +
+    'Other (X)\n- Your Highlight on Page 1 | C | Added on Monday, November 2, 2026, 09:06 AM\n\nNot this book\n==========\n';
+  const { els, relays } = await load({
+    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': clips, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
+    relay: async () => ({ status: 200, body: JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }], libraryVersion: 'v' }) })
+  });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
+  const html = els['bo-hl-list'].innerHTML;
+  assert.match(html, /On the reader \(1\)\. Press Send highlights/);
+  assert.match(html, /First &lt;quote&gt;/);
+  assert.doesNotMatch(html, /Not this book/);
+  assert.equal(relays.filter((r) => r.u.endsWith('/annotations')).length, 0, 'checking sends nothing');
+});
+
+test('the pulled list stays for Save as text file, and every other button clears it', async () => {
+  const pulledBody = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 5, 'C', 'pulled text')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
+  for (const clearing of ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull']) {
+    const { els, writes } = await load({
+      existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
+      relay: async (m, u) => ({ status: 201, body: u.endsWith('/exchange') ? pulledBody
+        : u.endsWith('/match-check') ? JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }] })
+        : u.endsWith('/annotations') ? JSON.stringify({ results: [{ hash: 'h', upserted: 0 }], unmatched: [] }) : '{}' })
+    });
+    els['bo-book'].value = '/b.epub';
+    await els['bo-hl-pull'].onclick();
+    assert.match(els['bo-hl-list'].innerHTML, /pulled text/);
+    await els['bo-hl-save'].onclick();
+    assert.match(els['bo-hl-list'].innerHTML, /pulled text/, 'saving keeps the list');
+    assert.equal(writes.length, 1);
+    await els[clearing].onclick();
+    if (clearing !== 'bo-hl-pull') assert.doesNotMatch(els['bo-hl-list'].innerHTML, /pulled text/, clearing + ' clears the old list');
+    if (clearing !== 'bo-hl-pull') assert.equal(els['bo-hl-save'].disabled, true);
+  }
+});
+
+test('choosing another book in the dropdown clears the list', async () => {
+  const both = JSON.stringify({ books: [{ path: '/a.epub', title: 'A' }, { path: '/b.epub', title: 'B' }] });
+  const { els } = await load({
+    existing: CONFIG, files: { '/a.epub': Buffer.from('abc'), '/.crosspoint/recent.json': both },
+    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 5, 'C', 'pulled text')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }) })
+  });
+  await els['bo-hl-pull'].onclick();
+  assert.match(els['bo-hl-list'].innerHTML, /pulled text/);
+  els['bo-recent'].value = '/b.epub';
+  els['bo-recent'].onchange();
+  assert.equal(els['bo-hl-list'].innerHTML, '');
+  assert.equal(els['bo-hl-save'].disabled, true);
 });
