@@ -633,3 +633,35 @@ test('pull: no highlights is orange, unknown or differing files are red, save ne
   await els['bo-hl-save'].onclick();
   assert.match(els['bo-hl-status'].textContent, /Pull the highlights first/);
 });
+
+// ---- Recent books ------------------------------------------------------------
+const RECENT = JSON.stringify({ books: [
+  { path: '/Books/Dinniman, Matt/The Butcher’s Masquerade.epub', title: 'The Butcher’s Masquerade', author: 'Matt Dinniman', coverBmpPath: '' },
+  { path: '/Comics/notes.txt', title: 'Notes', author: '', coverBmpPath: '' },
+  { path: '/Books/B & B.EPUB', title: '<i>B</i> & B', author: '', coverBmpPath: '' }
+] });
+
+test('recent books: the reader\'s recent list fills a dropdown and the newest book is preselected', async () => {
+  const { els } = await load({ existing: CONFIG, files: { '/.crosspoint/recent.json': RECENT }, relay: async () => ({ status: 200, body: '{}' }) });
+  const html = els['bo-recent'].innerHTML;
+  assert.match(html, /Choose a recent book/);
+  assert.match(html, /The Butcher’s Masquerade - Matt Dinniman/);
+  assert.doesNotMatch(html, /notes\.txt/, 'only EPUBs are offered');
+  assert.match(html, /&lt;i&gt;B&lt;\/i&gt; &amp; B/, 'titles are escaped');
+  assert.equal(els['bo-recent-row'].style.display, '');
+  assert.equal(els['bo-book'].value, '/Books/Dinniman, Matt/The Butcher’s Masquerade.epub');
+  els['bo-recent'].value = '/Books/B & B.EPUB';
+  els['bo-recent'].onchange();
+  assert.equal(els['bo-book'].value, '/Books/B & B.EPUB');
+  els['bo-recent'].value = '';
+  els['bo-recent'].onchange();
+  assert.equal(els['bo-book'].value, '/Books/B & B.EPUB', 'choosing the prompt leaves the path alone');
+});
+
+test('recent books: no list, a broken list or no EPUBs leaves the path box as it was', async () => {
+  for (const files of [{}, { '/.crosspoint/recent.json': 'not json' }, { '/.crosspoint/recent.json': JSON.stringify({ books: [{ path: '/a.txt' }] }) }]) {
+    const { els } = await load({ existing: CONFIG, files, relay: async () => ({ status: 200, body: '{}' }) });
+    assert.equal(els['bo-book'].value, '');
+    assert.notEqual(els['bo-recent-row'] && els['bo-recent-row'].style.display, '');
+  }
+});
