@@ -4,8 +4,8 @@ Made with AI, may contain errors. Written together with an AI assistant and
 lightly tested on real hardware. See KNOWN_ISSUES.md in the project page.
 
 Sends each reading session to your BookOrbit server so it shows up in the
-reading log, streaks and stats, and syncs your highlights. Needs a CrossPoint
-build that has the reader.session plugin event.
+reading log, streaks and stats, and syncs your highlights. Needs CrossPoint
+firmware 2.0 or newer (it has the reader.session plugin event).
 
 Setup (once, no file editing):
 1. Settings > Connectivity > Plugins: on. Restart the reader.

@@ -64,9 +64,9 @@ settings card.
 
 ## Requirements
 
-- A CrossPoint build that has SD plugins and the `reader.session` plugin event.
-  At the time of writing that is the develop branch, not a stable release (see
-  crosspoint-reader issue #2612).
+- CrossPoint firmware 2.0 or newer, which has SD plugins and the
+  `reader.session` plugin event. Older firmware ignores the event and nothing is
+  sent.
 - A reader with a clock chip: **Settings has a Clock option** (for example the
   Xteink X3 and X4 Pro). Readers without one, such as the X4C, are not supported;
   see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).

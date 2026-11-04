@@ -75,8 +75,8 @@ has no clock; it has not been tested end to end. Reports are welcome.
 
 ## 3. Needs firmware with the `reader.session` event
 
-SD plugins and the `reader.session` event are not in a stable CrossPoint release
-at the time of writing. Older firmware ignores the event and nothing is sent.
+SD plugins and the `reader.session` event are part of CrossPoint 2.0. Older
+firmware ignores the event and nothing is sent.
 
 ## 4. Delivery cannot be limited to the sync action
 
