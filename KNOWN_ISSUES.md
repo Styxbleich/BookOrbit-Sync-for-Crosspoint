@@ -33,6 +33,7 @@ totals, streaks and time-of-day achievements.
 |---|---|---|
 | Xteink X3 | ESP32-C3 | Correct times (tested) |
 | Xteink X4 Pro | ESP32-S3 | Sessions stamped ahead of real time (tested) |
+**Update:** on the X4 Pro, the future-dated sessions were seen early in testing and later stopped, with no change in firmware version. That fits the suspected cause below (a saved clock value that was ahead of real time and stopped mattering once real time passed it), but it has not been confirmed. It may be specific to one unit, or it may come back after a restart.
 | Xteink X4C | reported as ESP32-C3 rev4 by its owner | No clock chip (no Clock option in Settings). Not supported, see issue 2 |
 | Xteink X4 | ESP32-C3 | Not tested. If it has no clock chip, see issue 2 |
 
