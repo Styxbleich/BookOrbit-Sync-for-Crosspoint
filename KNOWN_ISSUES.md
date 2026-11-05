@@ -172,10 +172,10 @@ a button; it is not automatic, because plugin events cannot read files.
   other book.
 - **One way, and no clean-up.** Sending adds highlights to BookOrbit. Editing or
   deleting a highlight on the reader afterwards does not change BookOrbit, and
-  edits or deletions in BookOrbit do not change the reader. Pulling only shows
+  edits or deletions in BookOrbit do not change the reader. Check book only shows
   BookOrbit's highlights; **Add to reader** puts them on the reader.
-- **How pulling works.** BookOrbit's plugin login has no plain "list highlights"
-  call, so pulling uses its device sync exchange: it presents the book as an empty
+- **How Check book reads BookOrbit.** BookOrbit's plugin login has no plain "list highlights"
+  call, so Check book uses its device sync exchange: it presents the book as an empty
   copy and acknowledges each page of results. It keeps its own sync record per
   book copy on the server. Nothing odd has been seen, but long-term effects on
   BookOrbit's sync state have not been studied.

@@ -21,10 +21,9 @@ In the card:
   connection and Save.
 - Also send at sleep: sends sessions when the reader sleeps.
 - Highlights: pick a book from your recent books, then
-  Check book (confirms BookOrbit has it)
-  Send highlights (reader to BookOrbit)
-  Pull highlights (list BookOrbit's, then Add to reader; highlights on
-  the reader that BookOrbit lacks can be deleted from the reader)
+  Check book (confirms BookOrbit has it and compares highlights). Then
+  add BookOrbit's to the reader, or send the reader's to BookOrbit, or
+  delete ones BookOrbit lacks from the reader.
 
 Full guide and known issues:
 github.com/Styxbleich/BookOrbit-Sync-for-Crosspoint
