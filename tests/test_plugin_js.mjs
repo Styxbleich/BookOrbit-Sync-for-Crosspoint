@@ -1037,6 +1037,30 @@ test('strays: reader highlights BookOrbit does not have are listed with delete b
   assert.equal((html.match(/Delete from the reader/g) || []).length, 2);
 });
 
+test('pull list: highlights are split into not on the reader yet and already on the reader', async () => {
+  const entries = [entry(1, 'Chapter Two', A_TEXT), entry(2, 'Chapter Two', B_TEXT), entry(3, 'Chapter Two', C_TEXT)];
+  const { els } = await pullWithStore([strayRecord(A_TEXT)], { entries });
+  const html = els['bo-hl-list'].innerHTML;
+  assert.match(html, /Not on the reader yet \(2\)\. Add to reader will add these\./);
+  assert.match(html, /Already on the reader and in BookOrbit \(1\)\./);
+  assert.ok(html.indexOf(B_TEXT) < html.indexOf('Already on the reader'), 'to-add ones come first');
+  assert.ok(html.indexOf('Already on the reader') < html.indexOf(A_TEXT), 'the one already there is listed under its own heading');
+});
+
+test('pull list: after Add to reader everything moves to already on the reader', async () => {
+  const { els, writes } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const html = els['bo-hl-list'].innerHTML;
+  assert.match(html, /Every highlight BookOrbit has for this book is already on the reader\./);
+  assert.match(html, /Already on the reader and in BookOrbit \(1\)\./);
+  assert.doesNotMatch(html, /Not on the reader yet/);
+});
+
+test('pull list: with nothing on the reader every pulled highlight is marked to be added', async () => {
+  const { els } = await pullWithStore([], { entries: [entry(1, 'Chapter Two', A_TEXT)] });
+  assert.match(els['bo-hl-list'].innerHTML, /Not on the reader yet \(1\)/);
+  assert.doesNotMatch(els['bo-hl-list'].innerHTML, /Already on the reader/);
+});
+
 test('strays: nothing is offered when the reader and BookOrbit agree, or the reader has none', async () => {
   const same = await pullWithStore([strayRecord(A_TEXT)]);
   assert.match(same.els['bo-hl-strays'].innerHTML, /Every highlight on the reader is in BookOrbit/);

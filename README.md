@@ -155,8 +155,9 @@ background.
    were found in the book, and whether any matched text that appears more than
    once.
 4. **Pull highlights.** Lists the highlights BookOrbit has for the book, sorted
-   by page, with chapter, page and notes. Pulling does not change anything on
-   the reader.
+   by page, with chapter, page and notes, split into the ones not on the reader
+   yet (what **Add to reader** will add) and the ones already on the reader and
+   in BookOrbit. Pulling does not change anything on the reader.
 
 5. **Add to reader.** Available after a pull. Adds the pulled highlights to the
    reader's own highlight file for the book, and writes matching entries to

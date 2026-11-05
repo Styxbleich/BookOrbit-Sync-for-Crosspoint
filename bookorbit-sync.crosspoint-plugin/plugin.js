@@ -977,14 +977,15 @@ CrossPoint.registerPlugin(async (container, api) => {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   // header: a line above the list; items: { chapter, page, text, note }
+  const itemsHtml = (items) => items.map((e) =>
+    '<div style="border-top:1px solid #555;padding:8px 0">' +
+    '<div style="font-size:12px;color:#999">' + escapeHtml(e.chapter || '') + (e.page ? ' \u00b7 p. ' + escapeHtml(e.page) : '') + '</div>' +
+    '<div>' + escapeHtml(e.text) + '</div>' +
+    (e.note ? '<div style="font-size:13px;color:#999">Note: ' + escapeHtml(e.note) + '</div>' : '') + '</div>').join('');
+  const headerHtml = (text) => '<p style="color:#999;margin:12px 0 4px">' + escapeHtml(text) + '</p>';
+
   function showList(header, items) {
-    const list = $('bo-hl-list');
-    list.innerHTML = (header ? '<p style="color:#999;margin:12px 0 4px">' + escapeHtml(header) + '</p>' : '') +
-      items.map((e) =>
-        '<div style="border-top:1px solid #555;padding:8px 0">' +
-        '<div style="font-size:12px;color:#999">' + escapeHtml(e.chapter || '') + (e.page ? ' \u00b7 p. ' + escapeHtml(e.page) : '') + '</div>' +
-        '<div>' + escapeHtml(e.text) + '</div>' +
-        (e.note ? '<div style="font-size:13px;color:#999">Note: ' + escapeHtml(e.note) + '</div>' : '') + '</div>').join('');
+    $('bo-hl-list').innerHTML = (header ? headerHtml(header) : '') + itemsHtml(items);
   }
 
   // Any button other than Add to reader clears what was listed before.
@@ -1003,9 +1004,31 @@ CrossPoint.registerPlugin(async (container, api) => {
     $('bo-hl-actions').style.display = pulled ? '' : 'none';
   }
 
+  // The pulled highlights, split by whether the reader already has them (same text in its own
+  // highlight file). Everything pulled is in BookOrbit by definition.
   function renderPulled() {
     if (!pulled) return clearList();
-    showList('', pulled.entries.map((e) => ({ chapter: e.chapter, page: e.pageno, text: e.text, note: e.note })));
+    const row = (e) => ({ chapter: e.chapter, page: e.pageno, text: e.text, note: e.note });
+    if (!pulled.have) return showList('', pulled.entries.map(row));
+    const todo = pulled.entries.filter((e) => !pulled.have.has(e));
+    const done = pulled.entries.filter((e) => pulled.have.has(e));
+    const n = (list) => ' (' + list.length + ')';
+    $('bo-hl-list').innerHTML =
+      (todo.length ? headerHtml('Not on the reader yet' + n(todo) + '. Add to reader will add these.') + itemsHtml(todo.map(row))
+        : headerHtml('Every highlight BookOrbit has for this book is already on the reader.')) +
+      (done.length ? headerHtml('Already on the reader and in BookOrbit' + n(done) + '.') + itemsHtml(done.map(row)) : '');
+  }
+
+  async function markOnReader() {
+    if (!pulled) return;
+    try {
+      const { store } = await loadStore(pulled.path);
+      const records = store ? store.records : [];
+      pulled.have = new Set(pulled.entries.filter((e) => records.some((r) => sameHighlight(e.text, r.text))));
+    } catch (e) {
+      pulled.have = null; // could not read the reader's file: show the plain list
+    }
+    renderPulled();
   }
 
   async function pullAction() {
@@ -1053,7 +1076,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       entries.sort((x, y) => (x.pageno || 0) - (y.pageno || 0) || String(x.datetime).localeCompare(String(y.datetime)));
       if (!entries.length) return hlStatus('BookOrbit has no highlights for this book yet.', false, false, true);
       pulled = { entries, complete, info: { title, author }, path };
-      renderPulled();
+      await markOnReader();
       syncActions();
       await findStrays();
       hlStatus('Got ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' from BookOrbit. ' +
@@ -1352,11 +1375,13 @@ CrossPoint.registerPlugin(async (container, api) => {
       if (!fresh.length) {
         // Nothing to add to the reader, but /My Clippings.txt may still be missing entries for it.
         const clips = await syncClippings(keep.path, keep.entries.filter((e) => store.records.some((r) => sameHighlight(e.text, r.text))), store.records);
+        await markOnReader();
         return hlStatus('Nothing new to add to the reader.' + clips + tail, false, false, true);
       }
       store.records.push(...fresh.sort((x, y) => x.spine - y.spine || x.start - y.start));
       await writeStore(loaded, store.strings, store.records);
       const clips = await syncClippings(keep.path, freshEntries, store.records);
+      await markOnReader();
       hlStatus('Added ' + fresh.length + ' highlight' + (fresh.length === 1 ? '' : 's') + ' to the reader.' + clips + tail, false, true);
       await findStrays();
     } catch (e) {
