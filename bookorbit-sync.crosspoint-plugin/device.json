@@ -1,6 +1,6 @@
 {
   "title": "BookOrbit Sync",
-  "description": "Sends your reading sessions to BookOrbit",
+  "description": "Sends reading sessions and highlights to your BookOrbit server. Set up on the reader's web page.",
   "config": {
     "file": "config.json"
   },
@@ -17,7 +17,7 @@
           "x-auth-user": "{cfg.user}",
           "x-auth-key": "{cfg.key}"
         },
-        "body": "{\"deviceId\":\"{cfg.device_id}\",\"deviceModel\":\"CrossPoint\",\"pluginVersion\":\"crosspoint/0.12.0\",\"books\":[{\"hash\":\"{event.document}\",\"events\":[{\"page\":{event.start_progress_bp},\"startTime\":{event.start_time},\"durationSeconds\":{event.duration_seconds},\"totalPages\":10000},{\"page\":{event.end_progress_bp},\"startTime\":{event.end_time},\"durationSeconds\":0,\"totalPages\":10000}]}]}"
+        "body": "{\"deviceId\":\"{cfg.device_id}\",\"deviceModel\":\"CrossPoint\",\"pluginVersion\":\"crosspoint/0.13.0\",\"books\":[{\"hash\":\"{event.document}\",\"events\":[{\"page\":{event.start_progress_bp},\"startTime\":{event.start_time},\"durationSeconds\":{event.duration_seconds},\"totalPages\":10000},{\"page\":{event.end_progress_bp},\"startTime\":{event.end_time},\"durationSeconds\":0,\"totalPages\":10000}]}]}"
       },
       "toast": "BookOrbit: session sent"
     }

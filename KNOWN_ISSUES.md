@@ -14,7 +14,7 @@
   highlights features were tried on the X4 Pro with a few highlights in one
   book (sending, the position opening correctly in BookOrbit's web reader,
   pulling, saving the text file and the recent-books list). Other models
-  (X4 and others) are untested. The X4C has no clock chip and is not supported. Several details below were worked out by
+  (X4C and others) are untested. The original X4 has no clock chip and is not supported (see issue 2). Several details below were worked out by
   reading CrossPoint's source and have **not** been confirmed on hardware.
 - Not tested: other readers or firmware builds, Plugin Hub updates from an older
   version, very long sessions, many books over a long time, books with hundreds of
@@ -33,8 +33,8 @@ totals, streaks and time-of-day achievements.
 |---|---|---|
 | Xteink X3 | ESP32-C3 | Correct times (tested) |
 | Xteink X4 Pro | ESP32-S3 | Sessions stamped ahead of real time (tested) |
-| Xteink X4C | reported as ESP32-C3 rev4 by its owner | No clock chip (no Clock option in Settings). Not supported, see issue 2 |
-| Xteink X4 | ESP32-C3 | Not tested. If it has no clock chip, see issue 2 |
+| Xteink X4C | | Has a clock chip. Not tested |
+| Xteink X4 (original) | ESP32-C3 | No clock chip (no Clock option in Settings). Tested by the plugin author: no sessions were sent. Not supported, see issue 2 |
 
 This is one person's testing on one unit of each model that was tested, so
 treat it as a clue, not a diagnosis. If you try another model, please say what
@@ -67,16 +67,18 @@ trash icon in the Reading Log.
 The firmware only records a reading session when it has a valid time. Readers
 with a battery-backed clock chip (the Xteink X3 and X4 Pro have one; you can tell
 because **Settings has a Clock option**) keep time while powered off. Readers
-without one, such as the Xteink X4C, have no Clock option and rely on internet
+without one, such as the original Xteink X4, have no Clock option and rely on internet
 time, which is lost at power-off. On those readers sessions may not be recorded
 at all, or may carry a stale time, so this plugin is **not supported** on them.
-This comes from reading the firmware source plus one owner's report that the X4C
-has no clock; it has not been tested end to end. Reports are welcome.
+This comes from reading the firmware source. On an original X4 the plugin's author
+saw no sessions sent when syncing; the exact cause was not inspected on the device.
+Reports are welcome. A firmware fork with its own BookOrbit sync, CrossInk-BookOrbit,
+targets these readers.
 
 ## 3. Needs firmware with the `reader.session` event
 
-SD plugins and the `reader.session` event are not in a stable CrossPoint release
-at the time of writing. Older firmware ignores the event and nothing is sent.
+SD plugins and the `reader.session` event are part of CrossPoint 2.0. Older
+firmware ignores the event and nothing is sent.
 
 ## 4. Delivery cannot be limited to the sync action
 
@@ -155,6 +157,15 @@ a button; it is not automatic, because plugin events cannot read files.
   web reader. Highlights that are only partly found are flagged as approximate.
   The reader also stores the section number and paragraph for each highlight,
   which could make this exact; the plugin does not use them yet.
+- **Add to reader is experimental.** It writes the reader's own highlight file for
+  a book. The file layout and the way positions are counted were taken from the
+  firmware source and checked against two highlights in one book (the plugin's
+  numbers matched the reader's exactly), but nothing else is tested on a reader
+  yet. Things that may differ: chapters with scripts, hidden text or unusual
+  markup, and firmware versions newer than the one checked. A file it does not
+  recognise is left untouched. If the book is open on the reader while you press
+  the button, the reader keeps its old copy in memory; close the book first. Make
+  a copy of `/.crosspoint/clippings/` on the SD card before trying it.
 - **Slow on big books.** The EPUB is read through the reader's web server, one
   chapter at a time in your browser, so large books can take a while.
 - **Recent books only.** The dropdown is the reader's list of its last 10 opened

@@ -282,6 +282,206 @@ CrossPoint.registerPlugin(async (container, api) => {
     return { zip, spine, texts, title: spine.title };
   }
 
+  // ---- Highlights in the reader's own format ------------------------------------------------------
+  // The reader keeps a book's highlights in /.crosspoint/clippings/epub_<hash of the book path>.bin.
+  // Each one is placed by a chapter number and a start and end offset: the count of characters of
+  // text in that chapter's <body>, whitespace included, with &entities; already turned into characters.
+  const cpCount = (text) => { let n = 0; for (const unused of text) n++; return n; };
+  const RAW_SKIP = { script: 1, style: 1 };
+
+  function rawIndex(body) {
+    const starts = new Map();
+    const chars = [];
+    (function walk(el) {
+      for (const child of Array.from(el.childNodes)) {
+        if (child.nodeType === 1) {
+          if (!RAW_SKIP[tagOf(child)]) walk(child);
+        } else if (child.nodeType === 3 || child.nodeType === 4) {
+          starts.set(child, chars.length);
+          for (const ch of child.data) chars.push(ch);
+        }
+      }
+    })(body);
+    return { starts, chars };
+  }
+
+  const rawPos = (raw, node, utf16Index) => raw.starts.get(node) + cpCount(node.data.slice(0, utf16Index));
+
+  // The reader's file name uses std::hash of the book's path, which on its 32-bit chip is MurmurHash2.
+  function murmurHash2(bytes) {
+    const m = 0x5bd1e995;
+    let len = bytes.length;
+    let h = (0xc70f6907 ^ len) >>> 0;
+    let i = 0;
+    while (len >= 4) {
+      let k = (bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) >>> 0;
+      k = Math.imul(k, m) >>> 0;
+      k = (k ^ (k >>> 24)) >>> 0;
+      k = Math.imul(k, m) >>> 0;
+      h = Math.imul(h, m) >>> 0;
+      h = (h ^ k) >>> 0;
+      i += 4;
+      len -= 4;
+    }
+    if (len === 3) h = (h ^ (bytes[i + 2] << 16)) >>> 0;
+    if (len >= 2) h = (h ^ (bytes[i + 1] << 8)) >>> 0;
+    if (len >= 1) { h = (h ^ bytes[i]) >>> 0; h = Math.imul(h, m) >>> 0; }
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, m) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    return h;
+  }
+
+  const clippingStorePath = (bookPath) => '/.crosspoint/clippings/epub_' + murmurHash2(new TextEncoder().encode(bookPath)) + '.bin';
+
+  const STORE_VERSION = 4;
+  const REC_FIXED = 154; // bytes of one record before its text length
+  const REC_TEXT_MAX = 4096;
+  const REC_CHAPTER_MAX = 47;
+  const STORE_MAX_RECORDS = 256; // the smaller of the reader models' limits
+
+  // Cuts text to at most max bytes of UTF-8 without splitting a character.
+  function utf8Cut(text, max) {
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.length <= max) return bytes;
+    let cut = max;
+    while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--;
+    return bytes.slice(0, cut);
+  }
+
+  // Reads the reader's file without changing it. Throws if it is not exactly the format described
+  // above, so that a file this plugin does not understand is never rewritten.
+  function parseStore(bytes) {
+    const bad = () => new Error('the reader\'s highlight file for this book is in a format this plugin does not know, so it was left alone');
+    if (bytes.length < 3 || bytes[0] !== STORE_VERSION) throw bad();
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const count = view.getUint16(1, true);
+    let p = 3;
+    const strings = [];
+    for (let i = 0; i < 3; i++) {
+      if (p + 4 > bytes.length) throw bad();
+      const n = view.getUint32(p, true);
+      p += 4;
+      if (n > bytes.length - p) throw bad();
+      strings.push(bytes.slice(p, p + n));
+      p += n;
+    }
+    const decoder = new TextDecoder();
+    const records = [];
+    for (let i = 0; i < count; i++) {
+      if (p + REC_FIXED + 2 > bytes.length) throw bad();
+      const textLen = view.getUint16(p + REC_FIXED, true);
+      const end = p + REC_FIXED + 2 + textLen;
+      if (textLen > REC_TEXT_MAX || end > bytes.length) throw bad();
+      records.push({
+        raw: bytes.slice(p, end), spine: view.getUint16(p, true),
+        start: view.getUint32(p + 24, true), end: view.getUint32(p + 28, true),
+        text: decoder.decode(bytes.slice(p + REC_FIXED + 2, end))
+      });
+      p = end;
+    }
+    if (p !== bytes.length) throw bad();
+    return { strings, records };
+  }
+
+  function buildStore(strings, records) {
+    const parts = [new Uint8Array([STORE_VERSION, records.length & 0xff, records.length >> 8])];
+    for (const s of strings) {
+      const head = new Uint8Array(4);
+      new DataView(head.buffer).setUint32(0, s.length, true);
+      parts.push(head, s);
+    }
+    for (const r of records) parts.push(r.raw);
+    const out = new Uint8Array(parts.reduce((n, a) => n + a.length, 0));
+    let at = 0;
+    for (const a of parts) { out.set(a, at); at += a.length; }
+    return out;
+  }
+
+  // One new highlight. Pages and the layout number are left at 0: with offsets present the reader
+  // places the highlight by them alone, whatever the font size or margins.
+  function makeRecord(o) {
+    const text = utf8Cut(o.text, REC_TEXT_MAX);
+    const raw = new Uint8Array(REC_FIXED + 2 + text.length);
+    const view = new DataView(raw.buffer);
+    view.setUint16(12, Math.min(String(o.text).split(/\s+/).filter(Boolean).length, 0xffff), true);
+    view.setUint16(14, 0xffff, true); // paragraph: unknown
+    view.setUint16(0, o.spine, true);
+    view.setUint32(16, o.timestamp >>> 0, true);
+    view.setUint32(24, o.start, true);
+    view.setUint32(28, o.end, true);
+    raw.set(utf8Cut(o.chapter || '', REC_CHAPTER_MAX), 106);
+    view.setUint16(REC_FIXED, text.length, true);
+    raw.set(text, REC_FIXED + 2);
+    return { raw, spine: o.spine, start: o.start, end: o.end, text: o.text };
+  }
+
+  // KOReader-style position -> where it is in the chapter, or null if it is not in a form we follow.
+  function parsePosition(xp) {
+    const m = /^\/body\/DocFragment\[(\d+)\]\/body((?:\/[A-Za-z0-9_:-]+(?:\[\d+\])?)*)\/text\(\)(?:\[(\d+)\])?\.(\d+)$/.exec(String(xp || ''));
+    if (!m) return null;
+    const segments = m[2].split('/').filter(Boolean).map((seg) => {
+      const parts = /^([A-Za-z0-9_:-]+)(?:\[(\d+)\])?$/.exec(seg);
+      return [parts[1].toLowerCase(), Number(parts[2] || 1)];
+    });
+    return { fragment: Number(m[1]), segments, textNo: Number(m[3] || 1), offset: Number(m[4]) };
+  }
+
+  function walkPosition(body, pos) {
+    let el = body;
+    for (const [name, n] of pos.segments) {
+      el = Array.from(el.childNodes).filter((c) => c.nodeType === 1 && tagOf(c) === name)[n - 1];
+      if (!el) return null;
+    }
+    const texts = Array.from(el.childNodes).filter((c, at) =>
+      c.nodeType === 3 && c.data.length && !(at === 0 && /^\s*$/.test(c.data)));
+    const node = texts[pos.textNo - 1];
+    if (!node) return null;
+    let idx = 0;
+    let left = pos.offset;
+    for (const ch of node.data) { if (!left) break; idx += ch.length; left--; }
+    return left ? null : { node, idx };
+  }
+
+  async function chapterView(book, index) {
+    book.views = book.views || {};
+    if (book.views[index] === undefined) {
+      const file = book.spine[index] && book.zip.file(book.spine[index]);
+      const body = file ? parseMarkup(await file.async('string')).getElementsByTagName('body')[0] : null;
+      book.views[index] = body ? { body, raw: rawIndex(body) } : null;
+    }
+    return book.views[index];
+  }
+
+  // BookOrbit's own position, when it gives one that really spans the highlighted text.
+  async function placeByPosition(book, entry) {
+    const a = parsePosition(entry.pos0);
+    const b = parsePosition(entry.pos1);
+    if (!a || !b || a.fragment !== b.fragment) return null;
+    const index = a.fragment - 1;
+    const view = await chapterView(book, index);
+    if (!view) return null;
+    const from = walkPosition(view.body, a);
+    const to = walkPosition(view.body, b);
+    if (!from || !to) return null;
+    const start = rawPos(view.raw, from.node, from.idx);
+    const end = rawPos(view.raw, to.node, to.idx);
+    const want = normalizeQuote(entry.text);
+    if (!(end > start) || !want || normalizeQuote(view.raw.chars.slice(start, end).join('')) !== want) return null;
+    return { index, start, end };
+  }
+
+  // Where a BookOrbit highlight goes in the reader, or null (with why) when it cannot be placed safely.
+  async function placeOnReader(book, entry) {
+    let byPosition = null;
+    try { byPosition = await placeByPosition(book, entry); } catch (e) { byPosition = null; }
+    if (byPosition) return byPosition;
+    const hit = await locateIn(book, entry.text, entry.chapter);
+    if (!hit || hit.approx) return { missing: true };
+    if (hit.matches > 1 && !hit.byChapter) return { ambiguous: true };
+    return { index: hit.index, start: hit.rawStart, end: hit.rawEnd };
+  }
+
   // Finds one highlighted text in an opened book. Returns null when it cannot be found.
   async function locateIn(book, quote, chapter) {
     const wanted = normalizeQuote(quote);
@@ -321,10 +521,12 @@ CrossPoint.registerPlugin(async (container, api) => {
     const [endNode, endIdx] = indexed.at[last];
     const endUnit = (endNode.data.codePointAt(endIdx) || 0) > 0xffff ? 2 : 1;
     const fragment = pick.index + 1;
+    const raw = rawIndex(body);
     return {
       pos0: xpointerFor(fragment, startNode, startIdx),
       pos1: xpointerFor(fragment, endNode, endIdx + endUnit),
-      fragment, matches: total, approx: pick.approx, byChapter: pick.titled
+      fragment, matches: total, approx: pick.approx, byChapter: pick.titled,
+      index: pick.index, rawStart: rawPos(raw, startNode, startIdx), rawEnd: rawPos(raw, endNode, endIdx + endUnit)
     };
   }
 
@@ -379,7 +581,7 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   const $ = (id) => document.getElementById(id);
-  const PLUGIN_VERSION = 'crosspoint/0.12.0';
+  const PLUGIN_VERSION = 'crosspoint/0.13.0';
 
   container.innerHTML =
     '<details id="bo-panel"><summary style="cursor:pointer">' +
@@ -425,7 +627,8 @@ CrossPoint.registerPlugin(async (container, api) => {
     '<button type="button" id="bo-hl-check">Check book</button> ' +
     '<button type="button" id="bo-hl-send">Send highlights</button> ' +
     '<button type="button" id="bo-hl-pull">Pull highlights</button> ' +
-    '<button type="button" id="bo-hl-save" disabled>Save as text file</button></span></div>' +
+    '<button type="button" id="bo-hl-save" disabled>Save as text file</button> ' +
+    '<button type="button" id="bo-hl-add" disabled>Add to reader</button></span></div>' +
     '<p id="bo-hl-status" style="color:#666"></p>' +
     '<div id="bo-hl-list"></div></details>' +
     '</details>';
@@ -779,6 +982,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     pulled = null;
     $('bo-hl-list').innerHTML = '';
     $('bo-hl-save').disabled = true;
+    $('bo-hl-add').disabled = true;
   }
 
   function renderPulled() {
@@ -790,7 +994,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     if (!isConfigured()) return hlStatus('Save the server and login above first.', true);
     const path = $('bo-book').value.trim();
     if (!path.startsWith('/')) return hlStatus('Enter the book file path, starting with /.', true);
-    $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = $('bo-hl-save').disabled = true;
+    $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = $('bo-hl-save').disabled = $('bo-hl-add').disabled = true;
     clearList();
     try {
       const bytes = await bookBytes(path);
@@ -831,16 +1035,89 @@ CrossPoint.registerPlugin(async (container, api) => {
       if (!entries.length) return hlStatus('BookOrbit has no highlights for this book yet.', false, false, true);
       const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
       const base = safeFileName(title + (author ? ' - ' + author : '')) || 'Book';
-      pulled = { entries, info: { title, author }, file: dir + '/' + base + ' Highlights.txt' };
+      pulled = { entries, info: { title, author }, file: dir + '/' + base + ' Highlights.txt', path };
       renderPulled();
       $('bo-hl-save').disabled = false;
+      $('bo-hl-add').disabled = false;
       hlStatus('Got ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' from BookOrbit. ' +
-        'Save as text file writes "' + pulled.file + '" to the reader.', false, true);
+        'Save as text file writes "' + pulled.file + '" to the reader. Add to reader puts them in the reader\'s own highlights for the book.', false, true);
     } catch (e) {
       hlStatus('Could not finish: ' + (e && e.message ? e.message : e), true);
     } finally {
       $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = false;
-      $('bo-hl-save').disabled = !pulled;
+      $('bo-hl-save').disabled = $('bo-hl-add').disabled = !pulled;
+    }
+  }
+
+  // Puts the pulled highlights into the reader's own highlight file for the book, so they are drawn
+  // in the book and listed in its highlights menu. Highlights already there are never changed.
+  async function addToReaderAction() {
+    if (!pulled) return hlStatus('Pull the highlights first.', true);
+    const buttons = ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull', 'bo-hl-save', 'bo-hl-add'];
+    buttons.forEach((id) => { $(id).disabled = true; });
+    const keep = pulled;
+    try {
+      const bytes = await bookBytes(keep.path);
+      const book = await openBook(bytes, (n, of) => hlStatus('Reading the book (' + n + ' of ' + of + ')...'));
+      const storePath = clippingStorePath(keep.path);
+      hlStatus('Reading the reader\'s highlights for this book...');
+      const response = await fetch('/download?path=' + encodeURIComponent(storePath));
+      let store = null;
+      if (response.ok) store = parseStore(new Uint8Array(await response.arrayBuffer()));
+      else if (response.status !== 404) throw new Error('could not read the reader\'s highlight file (' + response.status + '), so nothing was changed');
+      if (!store) {
+        const enc = new TextEncoder();
+        store = { strings: [enc.encode(keep.info.title || ''), enc.encode(keep.info.author || ''), enc.encode(keep.path)], records: [] };
+      }
+      const seen = new Set(store.records.map((r) => normalizeQuote(r.text)));
+      // The same passage counts as already there even if its wording differs a little (curly quotes,
+      // spacing): any highlight in the same chapter that covers at least half of it is the same one.
+      const taken = store.records.map((r) => ({ spine: r.spine, start: r.start, end: r.end }));
+      const overlaps = (spot) => taken.some((t) => {
+        if (t.spine !== spot.index) return false;
+        const shared = Math.min(t.end, spot.end) - Math.max(t.start, spot.start);
+        return shared > 0 && shared * 2 >= Math.min(t.end - t.start, spot.end - spot.start);
+      });
+      const fresh = [];
+      const count = { have: 0, missing: 0, ambiguous: 0, full: 0 };
+      for (let i = 0; i < keep.entries.length; i++) {
+        const entry = keep.entries[i];
+        hlStatus('Finding highlight ' + (i + 1) + ' of ' + keep.entries.length + ' in the book...');
+        const text = String(entry.text || '').trim();
+        if (!text) continue;
+        if (seen.has(normalizeQuote(text))) { count.have++; continue; }
+        const spot = await placeOnReader(book, entry);
+        if (spot.missing) { count.missing++; continue; }
+        if (spot.ambiguous) { count.ambiguous++; continue; }
+        if (overlaps(spot)) { count.have++; continue; }
+        if (store.records.length + fresh.length >= STORE_MAX_RECORDS) { count.full++; continue; }
+        const stamp = Date.parse(String(entry.datetime || '').replace(' ', 'T'));
+        fresh.push(makeRecord({ spine: spot.index, start: spot.start, end: spot.end, text,
+          chapter: entry.chapter, timestamp: Number.isFinite(stamp) ? Math.floor(stamp / 1000) : 0 }));
+        seen.add(normalizeQuote(text));
+        taken.push({ spine: spot.index, start: spot.start, end: spot.end });
+      }
+      const skipped = [];
+      if (count.have) skipped.push(count.have + ' already on the reader');
+      if (count.missing) skipped.push(count.missing + ' not found in the book text');
+      if (count.ambiguous) skipped.push(count.ambiguous + ' skipped because the text appears more than once and BookOrbit gave no exact position');
+      if (count.full) skipped.push(count.full + ' skipped because the reader holds at most ' + STORE_MAX_RECORDS + ' highlights per book');
+      const tail = skipped.length ? ' Not added: ' + skipped.join(', ') + '.' : '';
+      if (!fresh.length) return hlStatus('Nothing new to add to the reader.' + tail, false, false, true);
+      store.records.push(...fresh.sort((x, y) => x.spine - y.spine || x.start - y.start));
+      const out = buildStore(store.strings, store.records);
+      if (out.length > 250 * 1024) throw new Error('the highlight file would be too big for the reader to accept, so nothing was changed');
+      let bin = '';
+      for (const byte of out) bin += String.fromCharCode(byte);
+      const written = await api.writeFile(storePath, btoa(bin));
+      if (written && written.ok === false) throw new Error(written.error || 'the reader could not write the file');
+      hlStatus('Added ' + fresh.length + ' highlight' + (fresh.length === 1 ? '' : 's') + ' to the reader.' + tail +
+        ' Close the book on the reader (go to the home screen) and open it again to see them.', false, true);
+    } catch (e) {
+      hlStatus('Could not add them: ' + (e && e.message ? e.message : e), true);
+    } finally {
+      ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull'].forEach((id) => { $(id).disabled = false; });
+      $('bo-hl-save').disabled = $('bo-hl-add').disabled = !pulled;
     }
   }
 
@@ -892,6 +1169,7 @@ CrossPoint.registerPlugin(async (container, api) => {
 
   $('bo-hl-pull').onclick = pullAction;
   $('bo-hl-save').onclick = saveHighlightsFile;
+  $('bo-hl-add').onclick = addToReaderAction;
   $('bo-hl-check').onclick = () => highlightAction(false);
   $('bo-hl-send').onclick = () => highlightAction(true);
 

@@ -1,8 +1,8 @@
 {
   "name": "bookorbit-sync",
   "title": "BookOrbit Sync",
-  "description": "Sends your reading sessions and highlights to your BookOrbit server",
-  "version": "0.12.0",
+  "description": "Sends reading sessions and highlights to your self-hosted BookOrbit server. Set up in the reader's web interface.",
+  "version": "0.13.0",
   "mount": "settings",
   "files": ["manifest.json", "device.json", "plugin.js", "config.example.json", "README.md"]
 }

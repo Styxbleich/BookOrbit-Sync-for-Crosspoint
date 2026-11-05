@@ -22,20 +22,21 @@ async function load({ existing = null, device = null, events = null, relay, file
   const relays = [];
   let register;
   const sandbox = {
-    document, TextEncoder, btoa, console, JSZip, DOMParser, Uint8Array, // same realm as JSZip, as in a browser
+    document, TextEncoder, TextDecoder, btoa, console, JSZip, DOMParser, Uint8Array, // same realm as JSZip, as in a browser
     CrossPoint: { registerPlugin: (fn) => { register = fn; } },
     fetch: async (url) => {
       const asked = url.startsWith('/download?path=') ? decodeURIComponent(url.slice('/download?path='.length)) : null;
       if (asked !== null && files[asked] !== undefined) {
         const f = files[asked];
         const buf = Buffer.isBuffer(f) ? f : Buffer.from(f, 'utf8');
-        return { ok: true, text: async () => buf.toString('utf8'),
+        return { ok: true, status: 200, text: async () => buf.toString('utf8'),
           arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
       }
       if (url.includes('events.jsonl')) return { ok: events !== null, text: async () => events };
       const isDev = url.includes('device.json');
       const body = isDev ? device : existing;
-      return { ok: body !== null && (isDev || url.includes('config.json')), text: async () => body };
+      const found = body !== null && (isDev || url.includes('config.json'));
+      return { ok: found, status: found ? 200 : 404, text: async () => body };
     }
   };
   vm.createContext(sandbox);
@@ -47,7 +48,7 @@ async function load({ existing = null, device = null, events = null, relay, file
   const api = {
     name: 'bookorbit-sync', dir: '/plugins/bookorbit-sync',
     relay: async (m, u, h, b) => { relays.push({ m, u, h, body: b }); return relay(m, u, h, b); },
-    writeFile: async (p, b64) => { writes.push({ p, text: Buffer.from(b64, 'base64').toString('utf8') }); return { ok: true }; }
+    writeFile: async (p, b64) => { writes.push({ p, text: Buffer.from(b64, 'base64').toString('utf8'), bin: Buffer.from(b64, 'base64') }); return { ok: true }; }
   };
   await register(container, api);
   return { els, writes, relays, container, host };
@@ -749,4 +750,210 @@ test('choosing another book in the dropdown clears the list', async () => {
   els['bo-recent'].onchange();
   assert.equal(els['bo-hl-list'].innerHTML, '');
   assert.equal(els['bo-hl-save'].disabled, true);
+});
+
+// ---- Adding pulled highlights to the reader's own highlight file ----------------------------------
+// An independent reader of the binary format, written from the firmware's ClippingStore::writeToFile.
+function decodeStore(buf) {
+  let p = 0;
+  const version = buf.readUInt8(p); p += 1;
+  const count = buf.readUInt16LE(p); p += 2;
+  const str = () => { const n = buf.readUInt32LE(p); p += 4; const v = buf.subarray(p, p + n).toString('utf8'); p += n; return v; };
+  const header = { title: str(), author: str(), path: str() };
+  const records = [];
+  for (let i = 0; i < count; i++) {
+    const r = {};
+    for (const k of ['spine', 'startPage', 'endPage', 'pageCount', 'startWord', 'endWord', 'wordCount', 'paragraph']) { r[k] = buf.readUInt16LE(p); p += 2; }
+    for (const k of ['timestamp', 'layout', 'startOffset', 'endOffset']) { r[k] = buf.readUInt32LE(p); p += 4; }
+    r.revision = buf.readBigUInt64LE(p); p += 8;
+    r.pending = buf.readUInt8(p); p += 1;
+    r.id = buf.subarray(p, p + 65).toString('latin1').replace(/\0+$/, ''); p += 65;
+    r.chapter = buf.subarray(p, p + 48).toString('utf8').replace(/\0+$/, ''); p += 48;
+    const n = buf.readUInt16LE(p); p += 2;
+    r.text = buf.subarray(p, p + n).toString('utf8'); p += n;
+    records.push(r);
+  }
+  assert.equal(p, buf.length, 'no bytes left over');
+  return { version, header, records };
+}
+
+function encodeStore(header, records) {
+  const parts = [Buffer.from([4]), Buffer.from([records.length & 255, records.length >> 8])];
+  for (const v of [header.title, header.author, header.path]) { const b = Buffer.from(v); const n = Buffer.alloc(4); n.writeUInt32LE(b.length); parts.push(n, b); }
+  for (const r of records) {
+    const f = Buffer.alloc(154);
+    f.writeUInt16LE(r.spine, 0); f.writeUInt16LE(r.startPage || 0, 2); f.writeUInt16LE(r.pageCount || 0, 6);
+    f.writeUInt32LE(r.layout || 0, 20); f.writeUInt32LE(r.startOffset, 24); f.writeUInt32LE(r.endOffset, 28);
+    f.writeUInt8(r.pending ? 1 : 0, 40); f.write(r.id || '', 41, 'latin1'); f.write(r.chapter || '', 106);
+    const t = Buffer.from(r.text); const n = Buffer.alloc(2); n.writeUInt16LE(t.length);
+    parts.push(f, n, t);
+  }
+  return Buffer.concat(parts);
+}
+
+// The text of a chapter the way the reader counts it: everything between the tags, entities decoded.
+const rawText = (xhtml) => xhtml.slice(xhtml.indexOf('<body')).replace(/<[^>]*>/g, '')
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+const cpIndex = (text, part) => Array.from(text.slice(0, text.indexOf(part))).length;
+
+const BOOK_PATH = '/Books/Test/Book.epub';
+const STORE_PATH = '/.crosspoint/clippings/epub_2361001545.bin';
+const entry = (id, chapter, text, pos0, pos1) => ({ serverId: id, version: 1, datetime: '2026-11-03 21:0' + id + ':00',
+  drawer: 'lighten', color: 'yellow', text, note: null, chapter, posFormat: 'xpointer', pos0: pos0 || null, pos1: pos1 || null, pageno: 1 });
+
+async function addToReader({ chapters = CHAPTERS, entries, store }) {
+  const epub = await makeEpub(chapters);
+  const files = { [BOOK_PATH]: epub, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') };
+  if (store) files[STORE_PATH] = store;
+  const body = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: entries, edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
+  const loaded = await load({ existing: CONFIG, files, relay: async () => ({ status: 201, body }) });
+  loaded.els['bo-book'].value = BOOK_PATH;
+  await loaded.els['bo-hl-pull'].onclick();
+  await loaded.els['bo-hl-add'].onclick();
+  const written = loaded.writes.filter((w) => w.p === STORE_PATH);
+  return { ...loaded, status: loaded.els['bo-hl-status'].textContent, written };
+}
+
+test('add to reader: the file name is the reader\'s own hash of the book path', async () => {
+  const { written } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  assert.equal(written.length, 1, 'wrote /.crosspoint/clippings/epub_2361001545.bin');
+});
+
+test('add to reader: offsets count the chapter text the way the reader does', async () => {
+  const quoteA = 'We ended up hiring five mercenaries.';
+  const quoteB = 'naïve line end';
+  const { written, status, els } = await addToReader({ entries: [
+    entry(1, 'Chapter Two', quoteA, '/body/DocFragment[2]/body/div[1]/p[2]/text()[1].0', '/body/DocFragment[2]/body/div[1]/p[2]/text()[2].18'),
+    entry(2, 'Chapter Three', quoteB)
+  ] });
+  assert.match(status, /^Added 2 highlights to the reader\./);
+  assert.equal(els['bo-hl-status'].style.color, '#3fb950');
+  const store = decodeStore(written[0].bin);
+  assert.equal(store.version, 4);
+  assert.deepEqual(store.header, { title: 'Book', author: '', path: BOOK_PATH }, 'a new file is named after the book');
+  const two = rawText(CH_TWO);
+  const [a, b] = store.records;
+  assert.equal(a.spine, 1);
+  assert.equal(a.startOffset, cpIndex(two, quoteA));
+  assert.equal(a.endOffset, a.startOffset + Array.from(quoteA).length);
+  assert.equal(a.text, quoteA);
+  assert.equal(a.chapter, 'Chapter Two');
+  const three = rawText(CH_THREE);
+  assert.equal(b.spine, 2);
+  assert.equal(b.startOffset, cpIndex(three, 'naïve'), 'counts characters, not UTF-16 units: the emoji is one');
+  const spanText = three.slice(three.indexOf('na\u00efve'), three.indexOf('line end') + 'line end'.length);
+  assert.ok(spanText.includes('\n'), 'the highlight crosses source whitespace');
+  assert.equal(b.endOffset - b.startOffset, Array.from(spanText).length, 'the source whitespace inside the highlight is counted');
+  for (const r of store.records) {
+    assert.equal(r.pending, 0, 'not queued for upload');
+    assert.equal(r.layout, 0);
+    assert.equal(r.id, '');
+    assert.equal(r.paragraph, 0xffff);
+    assert.equal(r.timestamp, Math.floor(Date.parse('2026-11-03T21:0' + (r === a ? 1 : 2) + ':00') / 1000));
+  }
+});
+
+test('add to reader: an existing highlight file keeps every byte, new ones follow, running again adds nothing', async () => {
+  const old = { spine: 1, startOffset: 5, endOffset: 9, text: 'Old one', chapter: 'Chapter Two', pending: true, id: 'abc123', layout: 777, pageCount: 40, startPage: 3 };
+  const header = { title: 'Book', author: 'Auth', path: BOOK_PATH };
+  const store = encodeStore(header, [old]);
+  const first = await addToReader({ store, entries: [entry(1, 'Chapter One', 'Opening words.'), entry(2, 'Chapter Two', 'Old one')] });
+  assert.match(first.status, /^Added 1 highlight to the reader\./);
+  assert.match(first.status, /1 already on the reader/);
+  const out = decodeStore(first.written[0].bin);
+  assert.deepEqual(out.header, header, 'title, author and path are kept');
+  assert.equal(out.records.length, 2);
+  assert.deepEqual(out.records[0], decodeStore(store).records[0], 'the old record is untouched');
+  assert.equal(out.records[1].text, 'Opening words.');
+  const oldRecord = store.subarray(store.length - (154 + 2 + 'Old one'.length));
+  assert.ok(first.written[0].bin.includes(oldRecord), 'the old record\'s bytes are copied as they were');
+
+  const second = await addToReader({ store: first.written[0].bin, entries: [entry(1, 'Chapter Two', 'Opening words.')] });
+  assert.match(second.status, /^Nothing new to add to the reader\./);
+  assert.equal(second.els['bo-hl-status'].style.color, '#f0a030');
+  assert.equal(second.written.length, 0, 'nothing is written when nothing is new');
+});
+
+test('add to reader: text that appears twice with no exact position, or is not in the book, is skipped', async () => {
+  const { written, status } = await addToReader({ entries: [
+    entry(1, 'Elsewhere', 'We ended up hiring five mercenaries.'),
+    entry(2, 'Chapter One', 'This text is not in the book at all.'),
+    entry(3, 'Chapter One', 'Opening words.')
+  ] });
+  assert.match(status, /^Added 1 highlight/);
+  assert.match(status, /1 not found in the book text/);
+  assert.match(status, /1 skipped because the text appears more than once/);
+  assert.equal(decodeStore(written[0].bin).records.length, 1);
+});
+
+test('add to reader: BookOrbit\'s own position is used, and decides between repeated text', async () => {
+  const q = 'We ended up hiring five mercenaries.';
+  const { written } = await addToReader({ entries: [
+    entry(1, 'Elsewhere', q, '/body/DocFragment[3]/body/section[1]/p[2]/text()[1].0', '/body/DocFragment[3]/body/section[1]/p[2]/text()[1].36')
+  ] });
+  const r = decodeStore(written[0].bin).records[0];
+  assert.equal(r.spine, 2);
+  assert.equal(r.startOffset, cpIndex(rawText(CH_THREE), q));
+});
+
+test('add to reader: a file in a format it does not know is left alone', async () => {
+  const odd = Buffer.from(encodeStore({ title: 'B', author: 'A', path: BOOK_PATH }, []));
+  odd[0] = 9;
+  const { written, status, els } = await addToReader({ store: odd, entries: [entry(1, 'Chapter One', 'Opening words.')] });
+  assert.equal(written.length, 0);
+  assert.match(status, /^Could not add them: .*format this plugin does not know/);
+  assert.equal(els['bo-hl-status'].style.color, '#ff6b6b');
+  const cut = encodeStore({ title: 'B', author: 'A', path: BOOK_PATH }, [{ spine: 1, startOffset: 1, endOffset: 3, text: 'xyz' }]).subarray(0, 120);
+  const again = await addToReader({ store: cut, entries: [entry(1, 'Chapter One', 'Opening words.')] });
+  assert.equal(again.written.length, 0, 'a cut-off file is not rewritten either');
+});
+
+test('add to reader: the button needs a pull first and is cleared with the list', async () => {
+  const { els } = await load({ existing: CONFIG, files: { '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') }, relay: async () => ({ status: 200, body: '{}' }) });
+  assert.equal(els['bo-hl-add'].disabled, true);
+  await els['bo-hl-add'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /Pull the highlights first/);
+});
+
+test('add to reader: never duplicates, however the same passage is worded or how often it is pressed', async () => {
+  const q = 'We ended up hiring five mercenaries.';
+  const two = rawText(CH_TWO);
+  const start = cpIndex(two, q);
+  // The reader already has this passage, worded differently (no final full stop, different text).
+  const header = { title: 'Book', author: '', path: BOOK_PATH };
+  const store = encodeStore(header, [{ spine: 1, startOffset: start, endOffset: start + q.length - 1, text: 'We ended up hiring five mercenaries', chapter: 'Chapter Two' }]);
+  const same = await addToReader({ store, entries: [entry(1, 'Chapter Two', q), entry(2, 'Chapter Two', q + ' ')] });
+  assert.match(same.status, /^Nothing new to add to the reader\./);
+  assert.equal(same.written.length, 0);
+  // Two pulled entries for one passage add it once.
+  const twice = await addToReader({ entries: [entry(1, 'Chapter Two', q), entry(2, 'Chapter Two', q.replace('five', 'five  '))] });
+  assert.match(twice.status, /^Added 1 highlight to the reader\./);
+  assert.equal(decodeStore(twice.written[0].bin).records.length, 1);
+  // Pressing the button again without pulling again changes nothing the second time.
+  const epub = await makeEpub(CHAPTERS);
+  const files = { [BOOK_PATH]: epub, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') };
+  const body = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [entry(1, 'Chapter Two', q)], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
+  const { els, writes } = await load({ existing: CONFIG, files, relay: async () => ({ status: 201, body }) });
+  els['bo-book'].value = BOOK_PATH;
+  await els['bo-hl-pull'].onclick();
+  await els['bo-hl-add'].onclick();
+  files[STORE_PATH] = writes.find((w) => w.p === STORE_PATH).bin; // what the reader now holds
+  await els['bo-hl-add'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /^Nothing new to add to the reader\./);
+  assert.equal(writes.filter((w) => w.p === STORE_PATH).length, 1);
+});
+
+test('add to reader: the button stays greyed out until highlights have been pulled', async () => {
+  const q = 'Opening words.';
+  const body = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [entry(1, 'Chapter One', q)], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
+  const { els } = await load({ existing: CONFIG, files: { [BOOK_PATH]: await makeEpub(CHAPTERS), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') },
+    relay: async (m, u) => ({ status: 200, body: u.endsWith('/match-check') ? JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }] }) : body }) });
+  els['bo-book'].value = BOOK_PATH;
+  assert.equal(els['bo-hl-add'].disabled, true, 'greyed out at the start');
+  await els['bo-hl-check'].onclick();
+  assert.equal(els['bo-hl-add'].disabled, true, 'Check book does not enable it');
+  await els['bo-hl-pull'].onclick();
+  assert.equal(els['bo-hl-add'].disabled, false, 'enabled after a pull that found highlights');
+  await els['bo-hl-check'].onclick();
+  assert.equal(els['bo-hl-add'].disabled, true, 'greyed out again when another button clears the list');
 });

@@ -28,6 +28,10 @@ Not affiliated with CrossPoint or BookOrbit.
   made in its web reader or on another device, are listed on the settings page
   and can be saved to the reader as a text file named
   `BOOK NAME - AUTHOR Highlights.txt`, so you can read them on the device.
+- **Add to reader (experimental).** After pulling, **Add to reader** puts those
+  highlights into the reader's own highlights for the book, so highlights made in
+  BookOrbit's web reader or on another device show up in the book on the device.
+  Highlights already on the reader are never changed.
 - **Choose a book from a list.** The settings page offers the books you opened
   recently on the reader, so you do not need to type a path.
 
@@ -64,11 +68,11 @@ settings card.
 
 ## Requirements
 
-- A CrossPoint build that has SD plugins and the `reader.session` plugin event.
-  At the time of writing that is the develop branch, not a stable release (see
-  crosspoint-reader issue #2612).
+- CrossPoint firmware 2.0 or newer, which has SD plugins and the
+  `reader.session` plugin event. Older firmware ignores the event and nothing is
+  sent.
 - A reader with a clock chip: **Settings has a Clock option** (for example the
-  Xteink X3 and X4 Pro). Readers without one, such as the X4C, are not supported;
+  Xteink X3 and X4 Pro). Readers without one, such as the original Xteink X4, are not supported;
   see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 - A BookOrbit server you can reach from the reader's WiFi, and a **KOReader sync**
   login for it (BookOrbit: Settings, Devices & Sync, KOReader). This is separate
@@ -150,8 +154,13 @@ background.
    comes from the EPUB's own title and author. Pulling does not change anything
    in the reader's own highlights.
 
+5. **Add to reader.** Available after a pull. Adds the pulled highlights to the
+   reader's own highlight file for the book. Close the book on the reader (go to
+   its home screen) first, and open it again afterwards. This is experimental, see
+   below.
+
 The list on the page clears when you press any other button or choose another
-book; **Save as text file** keeps it.
+book; **Save as text file** and **Add to reader** keep it.
 
 **Colours of the result box:** green is success, orange means nothing was wrong
 but nothing was sent (for example everything is already in BookOrbit, or the
@@ -173,6 +182,16 @@ book has no highlights), red is a problem.
   lost" in BookOrbit's web reader.
 - Highlights are only accepted for the exact file BookOrbit has. The result says
   so if the file differs.
+- Add to reader writes the reader's own highlight file for the book,
+  `/.crosspoint/clippings/epub_<number>.bin`, where the number is a hash of the
+  book's path that the plugin works out the same way the firmware does. Each
+  highlight is placed by its chapter and by how many characters of the chapter's
+  text come before it. The plugin uses BookOrbit's own position when it gives one
+  that really covers the highlighted text, and otherwise searches the book. A
+  highlight is skipped if its text is not found, or appears more than once with no
+  exact position, so it is never put in a guessed place. Existing highlights in the
+  file are copied as they are, and nothing is written when there is nothing new.
+  The reader holds at most 256 highlights per book (more on some models).
 - Pulling uses BookOrbit's KOReader annotation exchange, as if the reader were an
   empty copy of the book that asks for everything. Each page of results is
   acknowledged so the next page follows.
