@@ -592,7 +592,7 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   const $ = (id) => document.getElementById(id);
-  const PLUGIN_VERSION = 'crosspoint/0.13.0';
+  const PLUGIN_VERSION = 'crosspoint/1.0.0';
 
   container.innerHTML =
     '<details id="bo-panel"><summary style="cursor:pointer">' +
