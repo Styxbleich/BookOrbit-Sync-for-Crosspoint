@@ -24,6 +24,9 @@ Not affiliated with CrossPoint or BookOrbit.
   (**Send highlights**) and BookOrbit's to the reader (**Add to reader**).
   Nothing is duplicated, and both run when you press the button on the settings
   page, not in the background.
+- **BookOrbit is the source of truth.** After a pull, any highlight that is on
+  the reader but not in BookOrbit is listed, with a button to delete it from the
+  reader (one at a time, or all of them). BookOrbit is never changed by this.
 - **Send highlights.** Highlights you make on the reader are sent to BookOrbit,
   each with a real position in the book, so BookOrbit's web reader opens the
   highlight at the right spot ("Open at this page") instead of showing "Anchor
@@ -32,7 +35,7 @@ Not affiliated with CrossPoint or BookOrbit.
   made in its web reader or on another device, are listed on the settings page
   and can be saved to the reader as a text file named
   `BOOK NAME - AUTHOR Highlights.txt`, so you can read them on the device.
-- **Add to reader (experimental).** After pulling, **Add to reader** puts those
+- **Add to reader.** After pulling, **Add to reader** puts those
   highlights into the reader's own highlights for the book, so highlights made in
   BookOrbit's web reader or on another device show up in the book on the device.
   Highlights already on the reader are never changed.
@@ -159,7 +162,9 @@ background.
    in the reader's own highlights.
 
 5. **Add to reader.** Available after a pull. Adds the pulled highlights to the
-   reader's own highlight file for the book. This is experimental, see below.
+   reader's own highlight file for the book. Anything on the reader that BookOrbit
+   does not have is then listed, so you can delete it from the reader: a button
+   per highlight and **Delete all**, each needing a second press to confirm.
 
 The list on the page clears when you press any other button or choose another
 book; **Save as text file** and **Add to reader** keep it.
@@ -184,6 +189,13 @@ book has no highlights), red is a problem.
   lost" in BookOrbit's web reader.
 - Highlights are only accepted for the exact file BookOrbit has. The result says
   so if the file differs.
+- Deleting from the reader removes the highlight from the same file. BookOrbit
+  is not touched. Before the plugin changes that file it saves a copy of it as
+  `backup-epub_<number>.bin` in the plugin's folder (one copy per book, replaced
+  each time). A highlight is treated as being in BookOrbit when its text matches,
+  allowing for small differences in spacing or quotes. The reader's
+  `/My Clippings.txt` only ever grows, so Send highlights ignores anything that is
+  no longer in the reader's own highlights; a deleted highlight is not sent again.
 - Add to reader writes the reader's own highlight file for the book,
   `/.crosspoint/clippings/epub_<number>.bin`, where the number is a hash of the
   book's path that the plugin works out the same way the firmware does. Each

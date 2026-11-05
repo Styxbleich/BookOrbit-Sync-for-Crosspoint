@@ -24,7 +24,8 @@ In the card:
   Check book (confirms BookOrbit has it)
   Send highlights (reader to BookOrbit)
   Pull highlights (list BookOrbit's, then save as a text file or Add to
-  reader, experimental)
+  reader; highlights on the reader that BookOrbit lacks can be deleted
+  from the reader)
 
 Full guide and known issues:
 github.com/Styxbleich/BookOrbit-Sync-for-Crosspoint

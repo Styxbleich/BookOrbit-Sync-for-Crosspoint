@@ -376,6 +376,8 @@ CrossPoint.registerPlugin(async (container, api) => {
       records.push({
         raw: bytes.slice(p, end), spine: view.getUint16(p, true),
         start: view.getUint32(p + 24, true), end: view.getUint32(p + 28, true),
+        synced: bytes[p + 41] !== 0, // has an id from a CrossPoint sync server
+        chapter: decoder.decode(bytes.slice(p + 106, p + 154)).replace(/\0[\s\S]*$/, ''),
         text: decoder.decode(bytes.slice(p + REC_FIXED + 2, end))
       });
       p = end;
@@ -630,7 +632,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     '<li><strong>Send highlights:</strong> sends the reader\'s highlights for this book to BookOrbit. ' +
     'Ones it already has are skipped.</li>' +
     '<li><strong>Pull highlights:</strong> lists the highlights BookOrbit has for this book.</li>' +
-    '<li><strong>Add to reader:</strong> after a pull, adds them to the reader\'s own highlights (experimental).</li>' +
+    '<li><strong>Add to reader:</strong> after a pull, adds them to the reader\'s own highlights. Ones on the reader that BookOrbit does not have can then be deleted from the reader.</li>' +
     '<li><strong>Save as text file:</strong> after a pull, saves them as a text file next to the book.</li>' +
     '</ul>' +
     '<div class="setting-row" id="bo-recent-row" style="display:none"><span class="setting-name">Recent books</span>' +
@@ -645,7 +647,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     '<button type="button" id="bo-hl-add" disabled>Add to reader</button> ' +
     '<button type="button" id="bo-hl-save" disabled>Save as text file</button></span></div>' +
     '<p id="bo-hl-status" style="color:#666"></p>' +
-    '<div id="bo-hl-list"></div></details>' +
+    '<div id="bo-hl-list"></div><div id="bo-hl-strays"></div></details>' +
     '</details>';
 
   // Show this card first on the Plugins page, above the other plugins.
@@ -878,12 +880,20 @@ CrossPoint.registerPlugin(async (container, api) => {
         // book's highlights to another.
         const titles = [book && book.title, recentTitles[path]].filter(Boolean);
         entries = all.filter((c) => titles.some((t) => sameTitle(c.title, t)));
+        const present = await stillOnReader(path, entries);
+        const gone = present.gone;
+        entries = present.entries;
+        if (!entries.length && gone) {
+          return hlStatus('The ' + gone + ' highlight' + (gone === 1 ? '' : 's') + ' for this book in /My Clippings.txt ' +
+            (gone === 1 ? 'was' : 'were') + ' deleted from the reader, so nothing was sent.', false, false, true);
+        }
         if (!entries.length) {
           return hlStatus(titles.length
             ? 'No highlights for "' + titles[0] + '" were found in /My Clippings.txt, so nothing was sent.'
             : 'Could not tell which highlights belong to this book (it has no title), so nothing was sent.',
           false, false, true);
         }
+        const goneNote = gone ? ' ' + gone + ' deleted from the reader ' + (gone === 1 ? 'was' : 'were') + ' skipped.' : '';
         hlStatus('Looking for ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' in the book...');
         let found = 0;
         let uncertain = 0;
@@ -912,13 +922,13 @@ CrossPoint.registerPlugin(async (container, api) => {
         const already = Math.max(0, n - upserted);
         if (upserted === 0) {
           return hlStatus('Nothing new to send: ' + (n === 1 ? 'this highlight is' : 'all ' + n + ' highlights are') +
-            ' already in BookOrbit.', false, false, true);
+            ' already in BookOrbit.' + goneNote, false, false, true);
         }
         let msg = 'Sent. ' + upserted + ' new' + (already ? ', ' + already + ' already in BookOrbit' : '') + '. ' +
           found + ' of ' + n + ' found in the book';
         if (lost) msg += ', ' + lost + ' could not be found (placeholder position, will show "Anchor lost")';
         if (uncertain) msg += ', ' + uncertain + ' matched text that appears more than once or only partly, so check ' + (uncertain === 1 ? 'it' : 'them');
-        msg += '.';
+        msg += '.' + goneNote;
         return hlStatus(msg, false, true);
       }
       hlStatus('Asking BookOrbit...');
@@ -935,6 +945,7 @@ CrossPoint.registerPlugin(async (container, api) => {
         try {
           const titles = await bookTitles(bytes, path);
           mine = parseClippings(await readText('/My Clippings.txt')).filter((c) => titles.some((t) => sameTitle(c.title, t)));
+          mine = (await stillOnReader(path, mine)).entries;
         } catch (e) { mine = []; }
         if (mine.length) {
           showList('On the reader (' + mine.length + '). Press Send highlights to send them to BookOrbit.',
@@ -999,7 +1010,10 @@ CrossPoint.registerPlugin(async (container, api) => {
   // Any button other than "Save as text file" clears what was listed before.
   function clearList() {
     pulled = null;
+    strays = null;
+    armed = null;
     $('bo-hl-list').innerHTML = '';
+    $('bo-hl-strays').innerHTML = '';
     $('bo-hl-save').disabled = true;
     $('bo-hl-add').disabled = true;
   }
@@ -1029,6 +1043,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       hlStatus('Asking BookOrbit...');
       const entries = [];
       let first = true;
+      let complete = false;
       for (let page = 0; page < 30; page++) {
         const book = { hash, keys: [], keysComplete: false, sidecarState: first ? 'new' : 'known', changes: [] };
         const r = await postJson('annotations/exchange', Object.assign(deviceInfo(), { books: [book] }));
@@ -1047,23 +1062,165 @@ CrossPoint.registerPlugin(async (container, api) => {
             applied: adds.map((a) => ({ serverId: a.serverId, version: a.version, status: 'applied' }))
           }] }));
         }
-        if (!result.more || !adds.length) break;
+        if (!result.more || !adds.length) { complete = true; break; }
         hlStatus('Asking BookOrbit... (' + entries.length + ' so far)');
       }
       entries.sort((x, y) => (x.pageno || 0) - (y.pageno || 0) || String(x.datetime).localeCompare(String(y.datetime)));
       if (!entries.length) return hlStatus('BookOrbit has no highlights for this book yet.', false, false, true);
       const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
       const base = safeFileName(title + (author ? ' - ' + author : '')) || 'Book';
-      pulled = { entries, info: { title, author }, file: dir + '/' + base + ' Highlights.txt', path };
+      pulled = { entries, complete, info: { title, author }, file: dir + '/' + base + ' Highlights.txt', path };
       renderPulled();
       $('bo-hl-save').disabled = false;
       $('bo-hl-add').disabled = false;
+      await findStrays();
       hlStatus('Got ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' from BookOrbit. ' +
         'Save as text file writes "' + pulled.file + '" to the reader. Add to reader puts them in the reader\'s own highlights for the book.', false, true);
     } catch (e) {
       hlStatus('Could not finish: ' + whyFailed(e), true);
     } finally {
       $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = false;
+      $('bo-hl-save').disabled = $('bo-hl-add').disabled = !pulled;
+    }
+  }
+
+  const toBase64 = (bytes) => { let bin = ''; for (const byte of bytes) bin += String.fromCharCode(byte); return btoa(bin); };
+
+  // The same highlight, allowing for small differences in wording or spacing.
+  function sameHighlight(a, b) {
+    const x = normalizeQuote(a);
+    const y = normalizeQuote(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    const short = x.length < y.length ? x : y;
+    const long = x.length < y.length ? y : x;
+    return short.length >= 30 && long.includes(short);
+  }
+
+  // The reader's own highlight file for a book. store is null when the reader has none.
+  async function loadStore(bookPath) {
+    const storePath = clippingStorePath(bookPath);
+    const response = await fetch('/download?path=' + encodeURIComponent(storePath));
+    if (response.ok) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return { path: storePath, bytes, store: parseStore(bytes) };
+    }
+    if (response.status !== 404) throw new Error('could not read the reader\'s highlight file (' + response.status + '), so nothing was changed');
+    return { path: storePath, bytes: null, store: null };
+  }
+
+  // Keeps the file as it was before this plugin changes it: one copy per book, in the plugin's folder.
+  async function backupStore(storePath, bytes) {
+    if (!bytes) return;
+    const configPath = await locateConfigPath();
+    const dir = configPath.slice(0, configPath.lastIndexOf('/'));
+    const written = await api.writeFile(dir + '/backup-' + storePath.split('/').pop(), toBase64(bytes));
+    if (written && written.ok === false) throw new Error('could not make a backup copy first, so nothing was changed');
+  }
+
+  async function writeStore(loaded, strings, records) {
+    await backupStore(loaded.path, loaded.bytes);
+    const out = buildStore(strings, records);
+    if (out.length > 250 * 1024) throw new Error('the highlight file would be too big for the reader to accept, so nothing was changed');
+    const written = await api.writeFile(loaded.path, toBase64(out));
+    if (written && written.ok === false) throw new Error(written.error || 'the reader could not write the file');
+  }
+
+  // BookOrbit is where highlights are kept. The reader's own file is the list of what is on the reader
+  // now: /My Clippings.txt only ever grows, so a highlight deleted on the reader still sits in it.
+  async function stillOnReader(bookPath, entries) {
+    try {
+      const { store } = await loadStore(bookPath);
+      if (!store) return { entries, gone: 0 };
+      const kept = entries.filter((c) => store.records.some((r) => sameHighlight(c.text, r.text)));
+      return { entries: kept, gone: entries.length - kept.length };
+    } catch (e) {
+      return { entries, gone: 0 };
+    }
+  }
+
+  // ---- Highlights on the reader that BookOrbit does not have ------------------------------------
+  // Shown after a pull. BookOrbit is the source of truth, so these can be removed from the reader.
+  let strays = null; // { path, items: [{ key, text, chapter }], note }
+  let armed = null;  // the delete button that has been pressed once and waits for a second press
+
+  const recordKey = (r) => toBase64(r.raw);
+
+  async function findStrays() {
+    strays = null;
+    armed = null;
+    if (!pulled) return renderStrays();
+    if (!pulled.complete) {
+      strays = { path: pulled.path, items: [], synced: 0, note: 'BookOrbit has more highlights than could be listed, so the reader\'s cannot be compared safely.' };
+      return renderStrays();
+    }
+    try {
+      const { store } = await loadStore(pulled.path);
+      const records = store ? store.records : [];
+      const alone = records.filter((r) => !pulled.entries.some((e) => sameHighlight(e.text, r.text)));
+      strays = {
+        path: pulled.path,
+        items: alone.filter((r) => !r.synced).map((r) => ({ key: recordKey(r), text: r.text, chapter: r.chapter })),
+        synced: alone.filter((r) => r.synced).length
+      };
+    } catch (e) {
+      strays = { path: pulled.path, items: [], synced: 0, note: 'Could not compare with the highlights on the reader: ' + whyFailed(e) };
+    }
+    renderStrays();
+  }
+
+  function renderStrays() {
+    const box = $('bo-hl-strays');
+    if (!strays) { box.innerHTML = ''; return; }
+    const button = (act, id, label) => '<button type="button" data-act="' + act + '" data-id="' + escapeHtml(id) + '">' +
+      escapeHtml(armed === act + ':' + id ? 'Click again to delete' : label) + '</button>';
+    if (strays.note) { box.innerHTML = '<p style="color:#999">' + escapeHtml(strays.note) + '</p>'; return; }
+    const n = strays.items.length;
+    if (!n && !strays.synced) { box.innerHTML = '<p style="color:#999">Every highlight on the reader is in BookOrbit.</p>'; return; }
+    box.innerHTML = '<div style="margin:16px 0 4px"><strong>On the reader, not in BookOrbit' + (n ? ' (' + n + ')' : '') + '</strong>' +
+      (n > 1 ? ' ' + button('all', '', 'Delete all ' + n + ' from the reader') : '') + '</div>' +
+      strays.items.map((e, i) =>
+        '<div style="border-top:1px solid #555;padding:8px 0">' +
+        '<div style="font-size:12px;color:#999">' + escapeHtml(e.chapter || '') + '</div>' +
+        '<div>' + escapeHtml(e.text) + '</div>' +
+        '<div style="margin-top:4px">' + button('one', String(i), 'Delete from the reader') + '</div></div>').join('') +
+      (strays.synced ? '<p style="color:#999">' + strays.synced + ' more ' + (strays.synced === 1 ? 'is' : 'are') +
+        ' synced to a CrossPoint sync server and ' + (strays.synced === 1 ? 'has' : 'have') + ' to be deleted on the reader itself.</p>' : '');
+  }
+
+  async function strayClick(ev) {
+    const target = ev && ev.target;
+    const act = target && target.getAttribute && target.getAttribute('data-act');
+    if (!act || !strays || !pulled) return;
+    const id = target.getAttribute('data-id') || '';
+    if (armed !== act + ':' + id) { armed = act + ':' + id; renderStrays(); return; }
+    armed = null;
+    const chosen = act === 'all' ? strays.items.slice() : [strays.items[Number(id)]].filter(Boolean);
+    if (!chosen.length) return;
+    const buttons = ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull', 'bo-hl-save', 'bo-hl-add'];
+    buttons.forEach((b) => { $(b).disabled = true; });
+    try {
+      const loaded = await loadStore(strays.path);
+      if (!loaded.store) throw new Error('the reader has no highlight file for this book any more');
+      const wanted = new Map();
+      chosen.forEach((c) => wanted.set(c.key, (wanted.get(c.key) || 0) + 1));
+      const kept = [];
+      let removed = 0;
+      for (const r of loaded.store.records) {
+        const key = recordKey(r);
+        if (!r.synced && wanted.get(key) > 0) { wanted.set(key, wanted.get(key) - 1); removed++; } else kept.push(r);
+      }
+      if (!removed) {
+        hlStatus('Those highlights are already gone from the reader.', false, false, true);
+      } else {
+        await writeStore(loaded, loaded.store.strings, kept);
+        hlStatus('Deleted ' + removed + ' highlight' + (removed === 1 ? '' : 's') + ' from the reader. BookOrbit was not changed.', false, true);
+      }
+      await findStrays();
+    } catch (e) {
+      hlStatus('Could not delete: ' + whyFailed(e), true);
+    } finally {
+      ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull'].forEach((b) => { $(b).disabled = false; });
       $('bo-hl-save').disabled = $('bo-hl-add').disabled = !pulled;
     }
   }
@@ -1078,12 +1235,9 @@ CrossPoint.registerPlugin(async (container, api) => {
     try {
       const bytes = await bookBytes(keep.path);
       const book = await openBook(bytes, (n, of) => hlStatus('Reading the book (' + n + ' of ' + of + ')...'));
-      const storePath = clippingStorePath(keep.path);
       hlStatus('Reading the reader\'s highlights for this book...');
-      const response = await fetch('/download?path=' + encodeURIComponent(storePath));
-      let store = null;
-      if (response.ok) store = parseStore(new Uint8Array(await response.arrayBuffer()));
-      else if (response.status !== 404) throw new Error('could not read the reader\'s highlight file (' + response.status + '), so nothing was changed');
+      const loaded = await loadStore(keep.path);
+      let store = loaded.store;
       if (!store) {
         const enc = new TextEncoder();
         store = { strings: [enc.encode(keep.info.title || ''), enc.encode(keep.info.author || ''), enc.encode(keep.path)], records: [] };
@@ -1124,13 +1278,9 @@ CrossPoint.registerPlugin(async (container, api) => {
       const tail = skipped.length ? ' Not added: ' + skipped.join(', ') + '.' : '';
       if (!fresh.length) return hlStatus('Nothing new to add to the reader.' + tail, false, false, true);
       store.records.push(...fresh.sort((x, y) => x.spine - y.spine || x.start - y.start));
-      const out = buildStore(store.strings, store.records);
-      if (out.length > 250 * 1024) throw new Error('the highlight file would be too big for the reader to accept, so nothing was changed');
-      let bin = '';
-      for (const byte of out) bin += String.fromCharCode(byte);
-      const written = await api.writeFile(storePath, btoa(bin));
-      if (written && written.ok === false) throw new Error(written.error || 'the reader could not write the file');
+      await writeStore(loaded, store.strings, store.records);
       hlStatus('Added ' + fresh.length + ' highlight' + (fresh.length === 1 ? '' : 's') + ' to the reader.' + tail, false, true);
+      await findStrays();
     } catch (e) {
       hlStatus('Could not add them: ' + whyFailed(e), true);
     } finally {
@@ -1188,6 +1338,7 @@ CrossPoint.registerPlugin(async (container, api) => {
   $('bo-hl-pull').onclick = pullAction;
   $('bo-hl-save').onclick = saveHighlightsFile;
   $('bo-hl-add').onclick = addToReaderAction;
+  $('bo-hl-strays').onclick = strayClick;
   $('bo-hl-check').onclick = () => highlightAction(false);
   $('bo-hl-send').onclick = () => highlightAction(true);
 

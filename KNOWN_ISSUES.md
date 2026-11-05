@@ -157,14 +157,14 @@ a button; it is not automatic, because plugin events cannot read files.
   web reader. Highlights that are only partly found are flagged as approximate.
   The reader also stores the section number and paragraph for each highlight,
   which could make this exact; the plugin does not use them yet.
-- **Add to reader is experimental.** It writes the reader's own highlight file for
-  a book. The file layout and the way positions are counted were taken from the
-  firmware source and checked against two highlights in one book (the plugin's
-  numbers matched the reader's exactly), but nothing else is tested on a reader
-  yet. Things that may differ: chapters with scripts, hidden text or unusual
-  markup, and firmware versions newer than the one checked. A file it does not
-  recognise is left untouched. Make a copy of `/.crosspoint/clippings/` on the
-  SD card before trying it.
+- **Add to reader and deleting from the reader change the reader's own highlight
+  file.** The file layout and the way positions are counted were taken from the
+  firmware source and checked on a reader with several books, but unusual markup
+  (scripts, hidden text) and newer firmware may differ. A file the plugin does not
+  recognise is left untouched, and a copy of the file is saved in the plugin's
+  folder before every change. Deleting only ever touches the reader; BookOrbit is
+  not changed. A highlight is matched to BookOrbit's by its text, so one that was
+  edited in BookOrbit may be listed as not in BookOrbit.
 - **Slow on big books.** The EPUB is read through the reader's web server, one
   chapter at a time in your browser, so large books can take a while.
 - **Recent books only.** The dropdown is the reader's list of its last 10 opened
