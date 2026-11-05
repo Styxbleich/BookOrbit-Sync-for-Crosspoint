@@ -13,8 +13,8 @@
   server, a short period. Session delivery to BookOrbit worked on both. The
   highlights features were tried on the X4 Pro with a few highlights in one
   book (sending, the position opening correctly in BookOrbit's web reader,
-  pulling, saving the text file and the recent-books list). Other models
-  (X4 and others) are untested. The X4C has no clock chip and is not supported. Several details below were worked out by
+  pulling and the recent-books list). Other models
+  (X4C and others) are untested. The original X4 has no clock chip and is not supported (see issue 2). Several details below were worked out by
   reading CrossPoint's source and have **not** been confirmed on hardware.
 - Not tested: other readers or firmware builds, Plugin Hub updates from an older
   version, very long sessions, many books over a long time, books with hundreds of
@@ -33,9 +33,8 @@ totals, streaks and time-of-day achievements.
 |---|---|---|
 | Xteink X3 | ESP32-C3 | Correct times (tested) |
 | Xteink X4 Pro | ESP32-S3 | Sessions stamped ahead of real time (tested) |
-**Update:** on the X4 Pro, the future-dated sessions were seen early in testing and later stopped, with no change in firmware version. That fits the suspected cause below (a saved clock value that was ahead of real time and stopped mattering once real time passed it), but it has not been confirmed. It may be specific to one unit, or it may come back after a restart.
-| Xteink X4C | reported as ESP32-C3 rev4 by its owner | No clock chip (no Clock option in Settings). Not supported, see issue 2 |
-| Xteink X4 | ESP32-C3 | Not tested. If it has no clock chip, see issue 2 |
+| Xteink X4C | | Has a clock chip. Not tested |
+| Xteink X4 (original) | ESP32-C3 | No clock chip (no Clock option in Settings). Tested by the plugin author: no sessions were sent. Not supported, see issue 2 |
 
 This is one person's testing on one unit of each model that was tested, so
 treat it as a clue, not a diagnosis. If you try another model, please say what
@@ -68,11 +67,13 @@ trash icon in the Reading Log.
 The firmware only records a reading session when it has a valid time. Readers
 with a battery-backed clock chip (the Xteink X3 and X4 Pro have one; you can tell
 because **Settings has a Clock option**) keep time while powered off. Readers
-without one, such as the Xteink X4C, have no Clock option and rely on internet
+without one, such as the original Xteink X4, have no Clock option and rely on internet
 time, which is lost at power-off. On those readers sessions may not be recorded
 at all, or may carry a stale time, so this plugin is **not supported** on them.
-This comes from reading the firmware source plus one owner's report that the X4C
-has no clock; it has not been tested end to end. Reports are welcome.
+This comes from reading the firmware source. On an original X4 the plugin's author
+saw no sessions sent when syncing; the exact cause was not inspected on the device.
+Reports are welcome. A firmware fork with its own BookOrbit sync, CrossInk-BookOrbit,
+targets these readers.
 
 ## 3. Needs firmware with the `reader.session` event
 
@@ -156,6 +157,14 @@ a button; it is not automatic, because plugin events cannot read files.
   web reader. Highlights that are only partly found are flagged as approximate.
   The reader also stores the section number and paragraph for each highlight,
   which could make this exact; the plugin does not use them yet.
+- **Add to reader and deleting from the reader change the reader's own highlight
+  file.** The file layout and the way positions are counted were taken from the
+  firmware source and checked on a reader with several books, but unusual markup
+  (scripts, hidden text) and newer firmware may differ. A file the plugin does not
+  recognise is left untouched, and a copy of the file is saved in the plugin's
+  folder before every change. Deleting only ever touches the reader; BookOrbit is
+  not changed. A highlight is matched to BookOrbit's by its text, so one that was
+  edited in BookOrbit may be listed as not in BookOrbit.
 - **Slow on big books.** The EPUB is read through the reader's web server, one
   chapter at a time in your browser, so large books can take a while.
 - **Recent books only.** The dropdown is the reader's list of its last 10 opened
@@ -163,17 +172,18 @@ a button; it is not automatic, because plugin events cannot read files.
   other book.
 - **One way, and no clean-up.** Sending adds highlights to BookOrbit. Editing or
   deleting a highlight on the reader afterwards does not change BookOrbit, and
-  edits or deletions in BookOrbit do not change the reader. Pulling does not put
-  highlights into the reader's own highlight list; it only shows them and saves a
-  text file.
-- **How pulling works.** BookOrbit's plugin login has no plain "list highlights"
-  call, so pulling uses its device sync exchange: it presents the book as an empty
+  edits or deletions in BookOrbit do not change the reader. Check book only shows
+  BookOrbit's highlights; **Add to reader** puts them on the reader.
+- **How Check book reads BookOrbit.** BookOrbit's plugin login has no plain "list highlights"
+  call, so Check book uses its device sync exchange: it presents the book as an empty
   copy and acknowledges each page of results. It keeps its own sync record per
   book copy on the server. Nothing odd has been seen, but long-term effects on
   BookOrbit's sync state have not been studied.
-- **Text file limit.** The reader accepts files up to about 250 KB from a plugin.
-  If a book has more highlights than fit, the first ones that fit are saved and the
-  box says how many.
+- **/My Clippings.txt limit.** The reader accepts files up to about 250 KB from a
+  plugin. If `/My Clippings.txt` is over about 200 KB the plugin leaves it as it is
+  and says so. The reader itself only appends to it when you highlight on the
+  device, so entries for highlights you delete on the reader stay until the plugin
+  next updates the file (Add to reader, or a delete from the plugin).
 - **Highlight times.** The time of a highlight comes from the reader's own clock,
   so a reader with a wrong clock (see issue 1) can show wrong times.
 - **Highlight limits on the reader.** CrossPoint itself caps the number of

@@ -25,9 +25,9 @@ same firmware and the same plugin gave correct times.
   12-hour. The Clock screen showed the correct time.
 - **Not affected:** Xteink X3 (ESP32-C3), same plugin installed from the Plugin
   Hub: session times were correct.
-- **Not applicable:** an Xteink X4C (reported as ESP32-C3 rev4) has no clock
-  chip and no Clock option in Settings, so it was not compared.
-- **Not tested:** the original Xteink X4 (ESP32-C3).
+- **Not applicable:** the original Xteink X4 (ESP32-C3) has no clock chip and no
+  Clock option in Settings, so it was not compared.
+- **Not tested:** the Xteink X4C, which has a clock chip.
 - A plugin subscribed to `reader.session` (BookOrbit Sync, installed from the
   Plugin Hub).
 

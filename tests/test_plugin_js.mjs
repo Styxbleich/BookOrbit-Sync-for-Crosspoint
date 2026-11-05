@@ -13,7 +13,7 @@ import { DOMParser } from 'linkedom';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(here, '..', 'bookorbit-sync.crosspoint-plugin', 'plugin.js'), 'utf8');
 
-async function load({ existing = null, device = null, events = null, relay, files = {} }) {
+async function load({ existing = null, device = null, events = null, relay, files = {}, unreachable = [] }) {
   const els = {};
   const getEl = (id) => (els[id] ||= { id, value: '', placeholder: '', textContent: '', style: {}, disabled: false });
   const document = { getElementById: getEl };
@@ -22,20 +22,22 @@ async function load({ existing = null, device = null, events = null, relay, file
   const relays = [];
   let register;
   const sandbox = {
-    document, TextEncoder, btoa, console, JSZip, DOMParser, Uint8Array, // same realm as JSZip, as in a browser
+    document, TextEncoder, TextDecoder, btoa, console, JSZip, DOMParser, Uint8Array, // same realm as JSZip, as in a browser
     CrossPoint: { registerPlugin: (fn) => { register = fn; } },
     fetch: async (url) => {
       const asked = url.startsWith('/download?path=') ? decodeURIComponent(url.slice('/download?path='.length)) : null;
+      if (asked !== null && unreachable.includes(asked)) throw new TypeError('Failed to fetch');
       if (asked !== null && files[asked] !== undefined) {
         const f = files[asked];
         const buf = Buffer.isBuffer(f) ? f : Buffer.from(f, 'utf8');
-        return { ok: true, text: async () => buf.toString('utf8'),
+        return { ok: true, status: 200, text: async () => buf.toString('utf8'),
           arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
       }
       if (url.includes('events.jsonl')) return { ok: events !== null, text: async () => events };
       const isDev = url.includes('device.json');
       const body = isDev ? device : existing;
-      return { ok: body !== null && (isDev || url.includes('config.json')), text: async () => body };
+      const found = body !== null && (isDev || url.includes('config.json'));
+      return { ok: found, status: found ? 200 : 404, text: async () => body };
     }
   };
   vm.createContext(sandbox);
@@ -47,7 +49,7 @@ async function load({ existing = null, device = null, events = null, relay, file
   const api = {
     name: 'bookorbit-sync', dir: '/plugins/bookorbit-sync',
     relay: async (m, u, h, b) => { relays.push({ m, u, h, body: b }); return relay(m, u, h, b); },
-    writeFile: async (p, b64) => { writes.push({ p, text: Buffer.from(b64, 'base64').toString('utf8') }); return { ok: true }; }
+    writeFile: async (p, b64) => { const bin = Buffer.from(b64, 'base64'); writes.push({ p, text: bin.toString('utf8'), bin }); files[p] = bin; return { ok: true }; }
   };
   await register(container, api);
   return { els, writes, relays, container, host };
@@ -278,6 +280,28 @@ const CLIPS = [
   'Dune (Frank Herbert)\n- Your Highlight on Page 40 | Part 2 | The Gom Jabbar | Added on Tuesday, November 3, 2026, 04:12 PM\n\nFear is the mind-killer.\nSecond line.\n==========\n'
 ].join('');
 
+// A BookOrbit mock. The exchange lists `entries` (or the given `pages`), the annotations call answers
+// `upserted`, and the flags make the exchange say the file is unknown or differs from BookOrbit's copy.
+function bookOrbit({ entries = [], pages = null, upserted = 1, unmatched = false, incompatible = false, more = false, status = 201 } = {}) {
+  let n = 0;
+  const exchange = (body) => ({ status, body: JSON.stringify(body) });
+  return async (m, u) => {
+    if (u.endsWith('/annotations/exchange-ack')) return { status, body: '{}' };
+    if (u.endsWith('/annotations/exchange')) {
+      if (unmatched) return exchange({ results: [], unmatched: ['h'], positionIncompatible: [] });
+      if (incompatible) return exchange({ results: [], unmatched: [], positionIncompatible: ['h'] });
+      if (pages) return exchange(pages[Math.min(n++, pages.length - 1)]);
+      return exchange({ results: [{ hash: 'h', bookId: 1, toApply: { add: entries, edit: [], delete: [] }, more }], unmatched: [], positionIncompatible: [] });
+    }
+    if (u.endsWith('/annotations')) return { status, body: JSON.stringify({ results: [{ hash: 'h', upserted }], unmatched: [] }) };
+    return { status: 404, body: '{}' };
+  };
+}
+// What the list's buttons send: act is add, send or del; id is the highlight's number, or '' for all of them.
+const click = (act, id = '') => ({ target: { getAttribute: (n) => ({ 'data-act': act, 'data-id': id })[n] } });
+// Check book, then send everything the reader has that BookOrbit lacks.
+const checkAndSend = async (els) => { await els['bo-hl-check'].onclick(); await els['bo-hl-list'].onclick(click('send')); };
+
 function refPartialMd5(buf) {
   const parts = [];
   for (let i = -1; i <= 10; i++) {
@@ -293,13 +317,13 @@ test('highlights: book hash matches KOReader partial md5 for many sizes', async 
     const epub = crypto.randomBytes(n);
     const { els, relays } = await load({
       existing: CONFIG, files: { '/Books/b.epub': epub },
-      relay: async () => ({ status: 200, body: JSON.stringify({ matches: [{ hash: 'x', bookId: 1, bookFileId: 2 }], libraryVersion: 'v' }) })
+      relay: bookOrbit()
     });
     els['bo-book'].value = '/Books/b.epub';
     await els['bo-hl-check'].onclick();
     const body = JSON.parse(relays[0].body);
-    assert.deepEqual(body.hashes, [refPartialMd5(epub)], 'size ' + n);
-    assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
+    assert.equal(body.books[0].hash, refPartialMd5(epub), 'size ' + n);
+    assert.match(els['bo-hl-status'].textContent, /BookOrbit has this exact file/);
   }
 });
 
@@ -307,10 +331,10 @@ test('highlights: sends the book\'s highlights with hash, page, chapter and time
   const epub = crypto.randomBytes(30000);
   const { els, relays } = await load({
     existing: CONFIG, files: { '/Books/b.epub': epub, '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/Books/b.epub', 'Dune') },
-    relay: async () => ({ status: 200, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+    relay: bookOrbit({ upserted: 1 })
   });
   els['bo-book'].value = '/Books/b.epub';
-  await els['bo-hl-send'].onclick();
+  await checkAndSend(els);
   const call = relays.find((r) => r.u.endsWith('/annotations'));
   assert.equal(call.u, 'http://h:1/api/v1/koreader/plugin/annotations');
   assert.equal(call.h['x-auth-key'], 'k');
@@ -340,31 +364,31 @@ test('highlights: 12 AM / 12 PM and a missing "Added on" are handled', async () 
   ]) {
     const { els, relays } = await load({
       existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': clip, '/.crosspoint/recent.json': rec('/b.epub', 'B') },
-      relay: async () => ({ status: 200, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+      relay: bookOrbit({ upserted: 1 })
     });
     els['bo-book'].value = '/b.epub';
-    await els['bo-hl-send'].onclick();
-    const dt = JSON.parse(relays[0].body).books[0].annotations[0].datetime;
+    await checkAndSend(els);
+    const dt = JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body).books[0].annotations[0].datetime;
     if (expect instanceof RegExp) assert.match(dt, expect); else assert.equal(dt, expect);
   }
 });
 
 test('highlights: clear messages for the failure cases', async () => {
-  const ok = { status: 200, body: JSON.stringify({ results: [], unmatched: ['h'] }) };
+  const ok = bookOrbit({ unmatched: true });
   const cases = [
-    [{ existing: null, files: {}, relay: async () => ok }, '/b.epub', /Save the server and login/],
-    [{ existing: CONFIG, files: {}, relay: async () => ok }, 'b.epub', /starting with \//],
-    [{ existing: CONFIG, files: {}, relay: async () => ok }, '/nope.epub', /could not read \/nope\.epub/],
-    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a') }, relay: async () => ok }, '/b.epub', /no highlights found/],
-    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') }, relay: async () => ok }, '/b.epub', /does not have this exact file/],
-    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') }, relay: async () => ({ status: 401, body: '' }) }, '/b.epub', /answered 401/]
+    [{ existing: null, files: {}, relay: ok }, '/b.epub', /Save the server and login/],
+    [{ existing: CONFIG, files: {}, relay: ok }, 'b.epub', /starting with \//],
+    [{ existing: CONFIG, files: {}, relay: ok }, '/nope.epub', /could not read \/nope\.epub/],
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a') }, relay: bookOrbit() }, '/b.epub', /Neither BookOrbit nor the reader has highlights/],
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') }, relay: ok }, '/b.epub', /does not have this exact file/],
+    [{ existing: CONFIG, files: { '/b.epub': Buffer.from('a'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') }, relay: bookOrbit({ status: 401 }) }, '/b.epub', /answered 401/]
   ];
   for (const [opts, bookPath, re] of cases) {
     const { els } = await load(opts);
     els['bo-book'].value = bookPath;
-    await els['bo-hl-send'].onclick();
+    await els['bo-hl-check'].onclick();
     assert.match(els['bo-hl-status'].textContent, re);
-    assert.equal(els['bo-hl-send'].disabled, false);
+    assert.equal(els['bo-hl-check'].disabled, false);
   }
 });
 
@@ -372,27 +396,25 @@ test('highlights: check book reports a differing copy and an unknown file', asyn
   const run = async (data) => {
     const { els } = await load({
       existing: CONFIG, files: { '/b.epub': Buffer.from('abc') },
-      relay: async () => ({ status: 200, body: JSON.stringify(data) })
+      relay: bookOrbit(data)
     });
     els['bo-book'].value = '/b.epub';
     await els['bo-hl-check'].onclick();
     return els['bo-hl-status'].textContent;
   };
-  assert.match(await run({ matches: [], libraryVersion: 'v' }), /does not have this exact file/);
-  assert.match(await run({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2, positionCompatible: false }], libraryVersion: 'v' }), /differs from its copy/);
+  assert.match(await run({ unmatched: true }), /does not have this exact file/);
+  assert.match(await run({ incompatible: true }), /differs from its copy/);
 });
 
 test('highlights: BookOrbit answers POSTs with 201 Created, which counts as success', async () => {
   const { els } = await load({
     existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
-    relay: async (m, u) => ({ status: 201, body: JSON.stringify(u.endsWith('/annotations')
-      ? { results: [{ hash: 'h', upserted: 1 }], unmatched: [] }
-      : { matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }], libraryVersion: 'v' }) })
+    relay: bookOrbit({ status: 201, upserted: 1 })
   });
   els['bo-book'].value = '/b.epub';
   await els['bo-hl-check'].onclick();
-  assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
-  await els['bo-hl-send'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /BookOrbit has 0 highlights, the reader has 2\./);
+  await els['bo-hl-list'].onclick(click('send'));
   assert.match(els['bo-hl-status'].textContent, /^Sent\./);
 });
 
@@ -442,10 +464,10 @@ async function sendFor(quote, chapter, chapters) {
   const clip = 'Book (Auth)\n- Your Highlight on Page 3 | ' + chapter + ' | Added on Tuesday, November 3, 2026, 04:12 PM\n\n' + quote + '\n==========\n';
   const { els, relays } = await load({
     existing: CONFIG, files: { '/b.epub': epub, '/My Clippings.txt': clip, '/.crosspoint/recent.json': rec('/b.epub', 'Book') },
-    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+    relay: bookOrbit({ upserted: 1 })
   });
   els['bo-book'].value = '/b.epub';
-  await els['bo-hl-send'].onclick();
+  await checkAndSend(els);
   const body = JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body);
   return { a: body.books[0].annotations[0], status: els['bo-hl-status'].textContent };
 }
@@ -510,10 +532,10 @@ test('highlights: every highlight of the book is sent in one request, other book
     clip('The Real Title', 3, 'Chapter Two', 'Not in the book at all', '13');
   const { els, relays } = await load({
     existing: CONFIG, files: { '/b.epub': titled, '/My Clippings.txt': clips },
-    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 3 }], unmatched: [] }) })
+    relay: bookOrbit({ upserted: 3 })
   });
   els['bo-book'].value = '/b.epub';
-  await els['bo-hl-send'].onclick();
+  await checkAndSend(els);
   const sent = relays.filter((r) => r.u.endsWith('/annotations'));
   assert.equal(sent.length, 1);
   const anns = JSON.parse(sent[0].body).books[0].annotations;
@@ -526,7 +548,7 @@ test('highlights: every highlight of the book is sent in one request, other book
   assert.doesNotMatch(msg, /did not match/);
 });
 
-test('highlights: a book with no highlights of its own sends nothing, even when other books have highlights', async () => {
+test('highlights: a book with no highlights of its own offers nothing, even when other books have highlights', async () => {
   const withTitle = async (title) => {
     const plain = await JSZip.loadAsync(await makeEpub(CHAPTERS));
     const opf = await plain.file('OEBPS/content.opf').async('string');
@@ -539,12 +561,13 @@ test('highlights: a book with no highlights of its own sends nothing, even when 
     { '/b.epub': Buffer.from('not an epub'), '/My Clippings.txt': clips, '/.crosspoint/recent.json': rec('/b.epub', 'The Gate') }, // title from the recent list
     { '/b.epub': Buffer.from('not an epub'), '/My Clippings.txt': clips }                         // no title at all
   ]) {
-    const { els, relays } = await load({ existing: CONFIG, files, relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) }) });
+    const { els, relays } = await load({ existing: CONFIG, files, relay: bookOrbit() });
     els['bo-book'].value = '/b.epub';
-    await els['bo-hl-send'].onclick();
+    await checkAndSend(els);
     assert.equal(relays.filter((r) => r.u.endsWith('/annotations')).length, 0, 'nothing is sent');
-    assert.match(els['bo-hl-status'].textContent, /nothing was sent/);
+    assert.match(els['bo-hl-status'].textContent, /Neither BookOrbit nor the reader has highlights/);
     assert.equal(els['bo-hl-status'].style.color, '#f0a030');
+    assert.equal(els['bo-hl-list'].innerHTML, '', 'no buttons');
   }
 });
 
@@ -553,10 +576,10 @@ test('highlights: the title from the recent list finds highlights when the EPUB 
     'Another (A)\n- Your Highlight on Page 2 | X | Added on Tuesday, November 3, 2026, 04:13 PM\n\nSomething else.\n==========\n';
   const { els, relays } = await load({
     existing: CONFIG, files: { '/b.epub': await makeEpub(CHAPTERS), '/My Clippings.txt': clips, '/.crosspoint/recent.json': rec('/b.epub', 'My Book') },
-    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 1 }], unmatched: [] }) })
+    relay: bookOrbit({ upserted: 1 })
   });
   els['bo-book'].value = '/b.epub';
-  await els['bo-hl-send'].onclick();
+  await checkAndSend(els);
   const anns = JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body).books[0].annotations;
   assert.deepEqual(anns.map((a) => a.text), ['Opening words.']);
 });
@@ -564,10 +587,10 @@ test('highlights: the title from the recent list finds highlights when the EPUB 
 test('highlights: when everything is already in BookOrbit the box is orange, not red', async () => {
   const { els } = await load({
     existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
-    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', upserted: 0 }], unmatched: [] }) })
+    relay: bookOrbit({ upserted: 0 })
   });
   els['bo-book'].value = '/b.epub';
-  await els['bo-hl-send'].onclick();
+  await checkAndSend(els);
   const box = els['bo-hl-status'];
   assert.match(box.textContent, /^Nothing new to send: all 2 highlights are already in BookOrbit\.$/);
   assert.equal(box.style.color, '#f0a030');
@@ -584,72 +607,50 @@ async function epubWithMeta(title, author) {
 const add = (id, page, chapter, text, note) => ({ serverId: id, version: 1, datetime: '2026-11-03 21:0' + id + ':00', drawer: 'lighten',
   color: 'yellow', text, note: note || null, chapter, posFormat: 'xpointer', pos0: '/body/DocFragment[1]/body/p[1]/text()[1].0', pos1: null, pageno: page });
 
-test('pull: pages through BookOrbit, acknowledges each page, lists and saves BOOKNAME - AUTHOR Highlights.txt', async () => {
+test('check: pages through BookOrbit, acknowledges each page, lists them', async () => {
   const epub = await epubWithMeta('The Butcher’s Masquerade', 'Matt Dinniman');
   const pages = [
     { results: [{ hash: 'h', bookId: 1, toApply: { add: [add(2, 30, 'Chapter 7', 'Second <b>one</b> & more'), add(1, 27, 'Chapter 6', 'I’ve got “quotes”', 'my note')], edit: [], delete: [] }, more: true }], unmatched: [], positionIncompatible: [] },
     { results: [{ hash: 'h', bookId: 1, toApply: { add: [add(3, 31, 'Chapter 7', 'Third')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }
   ];
-  let n = 0;
   const { els, relays, writes } = await load({
     existing: CONFIG, files: { '/Books/Dinniman, Matt/b.epub': epub },
-    relay: async (m, u) => ({ status: 201, body: JSON.stringify(u.endsWith('/exchange') ? pages[n++] : { results: [], unmatched: [], positionIncompatible: [] }) })
+    relay: bookOrbit({ pages })
   });
   els['bo-book'].value = '/Books/Dinniman, Matt/b.epub';
-  await els['bo-hl-pull'].onclick();
+  await els['bo-hl-check'].onclick();
   const calls = relays.map((r) => r.u.split('/').pop());
   assert.deepEqual(calls, ['exchange', 'exchange-ack', 'exchange', 'exchange-ack']);
   const first = JSON.parse(relays[0].body).books[0];
   assert.deepEqual([first.sidecarState, first.keysComplete, first.keys, first.changes], ['new', false, [], []]);
   assert.equal(JSON.parse(relays[2].body).books[0].sidecarState, 'known');
   assert.deepEqual(JSON.parse(relays[1].body).books[0].applied.map((a) => a.serverId), [2, 1]);
-  assert.match(els['bo-hl-status'].textContent, /^Got 3 highlights from BookOrbit/);
+  assert.match(els['bo-hl-status'].textContent, /^BookOrbit has this exact file \(hash [0-9a-f]{32}\)\. BookOrbit has 3 highlights, the reader has 0\./);
   const html = els['bo-hl-list'].innerHTML;
   assert.ok(html.indexOf('quotes') < html.indexOf('Second'), 'sorted by page');
   assert.match(html, /Second &lt;b&gt;one&lt;\/b&gt; &amp; more/, 'text is escaped');
   assert.match(html, /Note: my note/);
-  assert.equal(els['bo-hl-save'].disabled, false);
-  await els['bo-hl-save'].onclick();
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].p, '/Books/Dinniman, Matt/The Butcher’s Masquerade - Matt Dinniman Highlights.txt');
-  assert.match(writes[0].text, /^The Butcher’s Masquerade\nMatt Dinniman\nHighlights from BookOrbit \(3\)\n\n== Chapter 6 ==\n\n\[p\. 27\] I’ve got “quotes”\nNote: my note\n\n== Chapter 7 ==\n\n\[p\. 30\] Second <b>one<\/b> & more\n\n\[p\. 31\] Third\n$/);
-  assert.match(els['bo-hl-status'].textContent, /^Saved 3 highlights to /);
+  assert.match(html, /Add all 3 to the reader/);
+  assert.equal(writes.length, 0, 'checking writes nothing to the reader');
 });
 
-test('pull: file name drops characters the SD card cannot hold, and falls back to the file name', async () => {
-  const epub = await epubWithMeta('Who: What? / Why*', 'A. "Author"');
-  const { els, writes } = await load({
-    existing: CONFIG, files: { '/b.epub': epub, '/plain.epub': Buffer.from('not a zip') },
-    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 1, 'C', 'x')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }) })
-  });
-  for (const [book, expected] of [['/b.epub', '/Who What Why - A. Author Highlights.txt'], ['/plain.epub', '/plain Highlights.txt']]) {
-    els['bo-book'].value = book;
-    await els['bo-hl-pull'].onclick();
-    await els['bo-hl-save'].onclick();
-    assert.equal(writes[writes.length - 1].p, expected);
-  }
-});
-
-test('pull: no highlights is orange, unknown or differing files are red, save needs a pull first', async () => {
+test('check: no highlights anywhere is orange, unknown or differing files are red', async () => {
   const run = async (data) => {
-    const { els, writes } = await load({ existing: CONFIG, files: { '/b.epub': Buffer.from('abc') },
-      relay: async () => ({ status: 201, body: JSON.stringify(data) }) });
+    const { els, writes } = await load({ existing: CONFIG, files: { '/b.epub': Buffer.from('abc') }, relay: bookOrbit(data) });
     els['bo-book'].value = '/b.epub';
-    await els['bo-hl-pull'].onclick();
-    return { box: els['bo-hl-status'], saveDisabled: els['bo-hl-save'].disabled, writes };
+    await els['bo-hl-check'].onclick();
+    return { box: els['bo-hl-status'], list: els['bo-hl-list'].innerHTML, writes };
   };
-  const none = await run({ results: [{ hash: 'h', bookId: 1, toApply: { add: [], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
-  assert.match(none.box.textContent, /no highlights for this book yet/);
+  const none = await run({});
+  assert.match(none.box.textContent, /Neither BookOrbit nor the reader has highlights for this book yet/);
   assert.equal(none.box.style.color, '#f0a030');
-  assert.equal(none.saveDisabled, true);
-  const unknown = await run({ results: [], unmatched: ['h'], positionIncompatible: [] });
+  assert.equal(none.list, '');
+  const unknown = await run({ unmatched: true });
   assert.match(unknown.box.textContent, /does not have this exact file/);
   assert.equal(unknown.box.style.color, '#ff6b6b');
-  const differs = await run({ results: [], unmatched: [], positionIncompatible: ['h'] });
+  assert.equal(unknown.list, '', 'a failed check stops there');
+  const differs = await run({ incompatible: true });
   assert.match(differs.box.textContent, /file differs from its copy/);
-  const { els } = await load({ existing: CONFIG, relay: async () => ({ status: 200, body: '{}' }) });
-  await els['bo-hl-save'].onclick();
-  assert.match(els['bo-hl-status'].textContent, /Pull the highlights first/);
 });
 
 // ---- Recent books ------------------------------------------------------------
@@ -704,49 +705,537 @@ test('check book lists the highlights the reader has for that book, ready to sen
     'Other (X)\n- Your Highlight on Page 1 | C | Added on Monday, November 2, 2026, 09:06 AM\n\nNot this book\n==========\n';
   const { els, relays } = await load({
     existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': clips, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
-    relay: async () => ({ status: 200, body: JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }], libraryVersion: 'v' }) })
+    relay: bookOrbit()
   });
   els['bo-book'].value = '/b.epub';
   await els['bo-hl-check'].onclick();
-  assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
+  assert.match(els['bo-hl-status'].textContent, /BookOrbit has 0 highlights, the reader has 1\./);
   const html = els['bo-hl-list'].innerHTML;
-  assert.match(html, /On the reader \(1\)\. Press Send highlights/);
+  assert.match(html, /On the reader, not in BookOrbit \(1\)/);
+  assert.match(html, /Send to BookOrbit/);
   assert.match(html, /First &lt;quote&gt;/);
   assert.doesNotMatch(html, /Not this book/);
   assert.equal(relays.filter((r) => r.u.endsWith('/annotations')).length, 0, 'checking sends nothing');
 });
 
-test('the pulled list stays for Save as text file, and every other button clears it', async () => {
-  const pulledBody = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 5, 'C', 'pulled text')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
-  for (const clearing of ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull']) {
-    const { els, writes } = await load({
-      existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
-      relay: async (m, u) => ({ status: 201, body: u.endsWith('/exchange') ? pulledBody
-        : u.endsWith('/match-check') ? JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }] })
-        : u.endsWith('/annotations') ? JSON.stringify({ results: [{ hash: 'h', upserted: 0 }], unmatched: [] }) : '{}' })
-    });
-    els['bo-book'].value = '/b.epub';
-    await els['bo-hl-pull'].onclick();
-    assert.match(els['bo-hl-list'].innerHTML, /pulled text/);
-    await els['bo-hl-save'].onclick();
-    assert.match(els['bo-hl-list'].innerHTML, /pulled text/, 'saving keeps the list');
-    assert.equal(writes.length, 1);
-    await els[clearing].onclick();
-    if (clearing !== 'bo-hl-pull') assert.doesNotMatch(els['bo-hl-list'].innerHTML, /pulled text/, clearing + ' clears the old list');
-    if (clearing !== 'bo-hl-pull') assert.equal(els['bo-hl-save'].disabled, true);
-  }
+test('a new check replaces the list, and a failed one leaves none', async () => {
+  let broken = false;
+  const good = bookOrbit({ entries: [add(1, 5, 'C', 'pulled text')] });
+  const { els } = await load({
+    existing: CONFIG, files: { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Dune') },
+    relay: async (m, u) => (broken ? bookOrbit({ unmatched: true })(m, u) : good(m, u))
+  });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-list'].innerHTML, /pulled text/);
+  broken = true;
+  await els['bo-hl-check'].onclick();
+  assert.equal(els['bo-hl-list'].innerHTML, '', 'the old list is gone');
+  assert.match(els['bo-hl-status'].textContent, /does not have this exact file/);
 });
 
 test('choosing another book in the dropdown clears the list', async () => {
   const both = JSON.stringify({ books: [{ path: '/a.epub', title: 'A' }, { path: '/b.epub', title: 'B' }] });
   const { els } = await load({
     existing: CONFIG, files: { '/a.epub': Buffer.from('abc'), '/.crosspoint/recent.json': both },
-    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 5, 'C', 'pulled text')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }) })
+    relay: bookOrbit({ entries: [add(1, 5, 'C', 'pulled text')] })
   });
-  await els['bo-hl-pull'].onclick();
+  await els['bo-hl-check'].onclick();
   assert.match(els['bo-hl-list'].innerHTML, /pulled text/);
   els['bo-recent'].value = '/b.epub';
   els['bo-recent'].onchange();
   assert.equal(els['bo-hl-list'].innerHTML, '');
-  assert.equal(els['bo-hl-save'].disabled, true);
+});
+
+// ---- Adding pulled highlights to the reader's own highlight file ----------------------------------
+// An independent reader of the binary format, written from the firmware's ClippingStore::writeToFile.
+function decodeStore(buf) {
+  let p = 0;
+  const version = buf.readUInt8(p); p += 1;
+  const count = buf.readUInt16LE(p); p += 2;
+  const str = () => { const n = buf.readUInt32LE(p); p += 4; const v = buf.subarray(p, p + n).toString('utf8'); p += n; return v; };
+  const header = { title: str(), author: str(), path: str() };
+  const records = [];
+  for (let i = 0; i < count; i++) {
+    const r = {};
+    for (const k of ['spine', 'startPage', 'endPage', 'pageCount', 'startWord', 'endWord', 'wordCount', 'paragraph']) { r[k] = buf.readUInt16LE(p); p += 2; }
+    for (const k of ['timestamp', 'layout', 'startOffset', 'endOffset']) { r[k] = buf.readUInt32LE(p); p += 4; }
+    r.revision = buf.readBigUInt64LE(p); p += 8;
+    r.pending = buf.readUInt8(p); p += 1;
+    r.id = buf.subarray(p, p + 65).toString('latin1').replace(/\0+$/, ''); p += 65;
+    r.chapter = buf.subarray(p, p + 48).toString('utf8').replace(/\0+$/, ''); p += 48;
+    const n = buf.readUInt16LE(p); p += 2;
+    r.text = buf.subarray(p, p + n).toString('utf8'); p += n;
+    records.push(r);
+  }
+  assert.equal(p, buf.length, 'no bytes left over');
+  return { version, header, records };
+}
+
+function encodeStore(header, records) {
+  const parts = [Buffer.from([4]), Buffer.from([records.length & 255, records.length >> 8])];
+  for (const v of [header.title, header.author, header.path]) { const b = Buffer.from(v); const n = Buffer.alloc(4); n.writeUInt32LE(b.length); parts.push(n, b); }
+  for (const r of records) {
+    const f = Buffer.alloc(154);
+    f.writeUInt16LE(r.spine, 0); f.writeUInt16LE(r.startPage || 0, 2); f.writeUInt16LE(r.pageCount || 0, 6);
+    f.writeUInt32LE(r.layout || 0, 20); f.writeUInt32LE(r.startOffset, 24); f.writeUInt32LE(r.endOffset, 28);
+    f.writeUInt8(r.pending ? 1 : 0, 40); f.write(r.id || '', 41, 'latin1'); f.write(r.chapter || '', 106);
+    const t = Buffer.from(r.text); const n = Buffer.alloc(2); n.writeUInt16LE(t.length);
+    parts.push(f, n, t);
+  }
+  return Buffer.concat(parts);
+}
+
+// The text of a chapter the way the reader counts it: everything between the tags, entities decoded.
+const rawText = (xhtml) => xhtml.slice(xhtml.indexOf('<body')).replace(/<[^>]*>/g, '')
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+const cpIndex = (text, part) => Array.from(text.slice(0, text.indexOf(part))).length;
+
+const BOOK_PATH = '/Books/Test/Book.epub';
+const STORE_PATH = '/.crosspoint/clippings/epub_2361001545.bin';
+const entry = (id, chapter, text, pos0, pos1) => ({ serverId: id, version: 1, datetime: '2026-11-03 21:0' + id + ':00',
+  drawer: 'lighten', color: 'yellow', text, note: null, chapter, posFormat: 'xpointer', pos0: pos0 || null, pos1: pos1 || null, pageno: 1 });
+
+async function addToReader({ chapters = CHAPTERS, entries, store, extra = {} }) {
+  const epub = await makeEpub(chapters);
+  const files = { [BOOK_PATH]: epub, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') };
+  if (store) files[STORE_PATH] = store;
+  Object.assign(files, extra);
+  const loaded = await load({ existing: CONFIG, files, relay: bookOrbit({ entries }) });
+  loaded.els['bo-book'].value = BOOK_PATH;
+  await loaded.els['bo-hl-check'].onclick();
+  await loaded.els['bo-hl-list'].onclick(click('add'));
+  const written = loaded.writes.filter((w) => w.p === STORE_PATH);
+  return { ...loaded, status: loaded.els['bo-hl-status'].textContent, written };
+}
+
+const CLIP_PATH = '/My Clippings.txt';
+const clipFor = (when, chapter, text) => 'Book ()\n- Your Highlight on Page 1 | ' + chapter + ' | Added on ' + when + '\n\n' + text + '\n==========\n';
+
+test('add to reader: /My Clippings.txt is created in the reader\'s own format when it is missing', async () => {
+  const { writes, status } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const clip = writes.find((w) => w.p === CLIP_PATH);
+  assert.equal(clip.bin.toString('utf8'), clipFor('Tuesday, November 3, 2026, 09:01 PM', 'Chapter Two', 'Then more text.'));
+  assert.match(status, /\/My Clippings\.txt: added 1 entry\./);
+  assert.ok(!writes.some((w) => w.p === '/plugins/bookorbit-sync/backup-My Clippings.txt'), 'nothing to back up');
+});
+
+test('add to reader: other books\' entries are kept, stale ones for this book are removed, new ones are appended', async () => {
+  const other = 'Other (B)\n- Your Highlight on Page 2 | C | Added on Monday, January 1, 2024, 10:00 AM\n\nOther book text\n==========\n';
+  const stale = clipFor('Monday, January 1, 2024, 10:00 AM', 'Chapter One', 'Deleted on the reader long ago, so it is stale.');
+  const { writes, status } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')], extra: { [CLIP_PATH]: other + stale } });
+  const clip = writes.find((w) => w.p === CLIP_PATH);
+  assert.equal(clip.bin.toString('utf8'), other + clipFor('Tuesday, November 3, 2026, 09:01 PM', 'Chapter Two', 'Then more text.'));
+  assert.equal(writes.find((w) => w.p === '/plugins/bookorbit-sync/backup-My Clippings.txt').bin.toString('utf8'), other + stale);
+  assert.match(status, /\/My Clippings\.txt: added 1 entry, removed 1 entry\./);
+});
+
+test('add to reader: pressing it again, or a highlight already in the file, adds no duplicate entry', async () => {
+  const first = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const clipText = first.writes.find((w) => w.p === CLIP_PATH).bin.toString('utf8');
+  const again = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')], store: first.written[0].bin, extra: { [CLIP_PATH]: clipText } });
+  assert.equal(again.writes.filter((w) => w.p === CLIP_PATH).length, 0);
+});
+
+test('add to reader: nothing new for the reader still creates the missing /My Clippings.txt', async () => {
+  const first = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const again = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')], store: first.written[0].bin });
+  assert.match(again.status, /^Nothing new to add to the reader\. \/My Clippings\.txt: added 1 entry\./);
+  assert.ok(again.writes.some((w) => w.p === CLIP_PATH));
+});
+
+test('add to reader: the file name is the reader\'s own hash of the book path', async () => {
+  const { written } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  assert.equal(written.length, 1, 'wrote /.crosspoint/clippings/epub_2361001545.bin');
+});
+
+test('add to reader: offsets count the chapter text the way the reader does', async () => {
+  const quoteA = 'We ended up hiring five mercenaries.';
+  const quoteB = 'naïve line end';
+  const { written, status, els } = await addToReader({ entries: [
+    entry(1, 'Chapter Two', quoteA, '/body/DocFragment[2]/body/div[1]/p[2]/text()[1].0', '/body/DocFragment[2]/body/div[1]/p[2]/text()[2].18'),
+    entry(2, 'Chapter Three', quoteB)
+  ] });
+  assert.match(status, /^Added 2 highlights to the reader\./);
+  assert.equal(els['bo-hl-status'].style.color, '#3fb950');
+  const store = decodeStore(written[0].bin);
+  assert.equal(store.version, 4);
+  assert.deepEqual(store.header, { title: 'Book', author: '', path: BOOK_PATH }, 'a new file is named after the book');
+  const two = rawText(CH_TWO);
+  const [a, b] = store.records;
+  assert.equal(a.spine, 1);
+  assert.equal(a.startOffset, cpIndex(two, quoteA));
+  assert.equal(a.endOffset, a.startOffset + Array.from(quoteA).length);
+  assert.equal(a.text, quoteA);
+  assert.equal(a.chapter, 'Chapter Two');
+  const three = rawText(CH_THREE);
+  assert.equal(b.spine, 2);
+  assert.equal(b.startOffset, cpIndex(three, 'naïve'), 'counts characters, not UTF-16 units: the emoji is one');
+  const spanText = three.slice(three.indexOf('na\u00efve'), three.indexOf('line end') + 'line end'.length);
+  assert.ok(spanText.includes('\n'), 'the highlight crosses source whitespace');
+  assert.equal(b.endOffset - b.startOffset, Array.from(spanText).length, 'the source whitespace inside the highlight is counted');
+  for (const r of store.records) {
+    assert.equal(r.pending, 0, 'not queued for upload');
+    assert.equal(r.layout, 0);
+    assert.equal(r.id, '');
+    assert.equal(r.paragraph, 0xffff);
+    assert.equal(r.timestamp, Math.floor(Date.parse('2026-11-03T21:0' + (r === a ? 1 : 2) + ':00') / 1000));
+  }
+});
+
+test('add to reader: an existing highlight file keeps every byte, new ones follow, running again adds nothing', async () => {
+  const old = { spine: 1, startOffset: 5, endOffset: 9, text: 'Old one', chapter: 'Chapter Two', pending: true, id: 'abc123', layout: 777, pageCount: 40, startPage: 3 };
+  const header = { title: 'Book', author: 'Auth', path: BOOK_PATH };
+  const store = encodeStore(header, [old]);
+  const first = await addToReader({ store, entries: [entry(1, 'Chapter One', 'Opening words.'), entry(2, 'Chapter Two', 'Old one')] });
+  assert.match(first.status, /^Added 1 highlight to the reader\./);
+  const out = decodeStore(first.written[0].bin);
+  assert.deepEqual(out.header, header, 'title, author and path are kept');
+  assert.equal(out.records.length, 2);
+  assert.deepEqual(out.records[0], decodeStore(store).records[0], 'the old record is untouched');
+  assert.equal(out.records[1].text, 'Opening words.');
+  const oldRecord = store.subarray(store.length - (154 + 2 + 'Old one'.length));
+  assert.ok(first.written[0].bin.includes(oldRecord), 'the old record\'s bytes are copied as they were');
+
+  const second = await addToReader({ store: first.written[0].bin, entries: [entry(1, 'Chapter Two', 'Opening words.')] });
+  assert.match(second.status, /^Nothing new to add to the reader\./);
+  assert.equal(second.els['bo-hl-status'].style.color, '#f0a030');
+  assert.equal(second.written.length, 0, 'nothing is written when nothing is new');
+});
+
+test('add to reader: text that appears twice with no exact position, or is not in the book, is skipped', async () => {
+  const { written, status } = await addToReader({ entries: [
+    entry(1, 'Elsewhere', 'We ended up hiring five mercenaries.'),
+    entry(2, 'Chapter One', 'This text is not in the book at all.'),
+    entry(3, 'Chapter One', 'Opening words.')
+  ] });
+  assert.match(status, /^Added 1 highlight/);
+  assert.match(status, /1 not found in the book text/);
+  assert.match(status, /1 skipped because the text appears more than once/);
+  assert.equal(decodeStore(written[0].bin).records.length, 1);
+});
+
+test('add to reader: BookOrbit\'s own position is used, and decides between repeated text', async () => {
+  const q = 'We ended up hiring five mercenaries.';
+  const { written } = await addToReader({ entries: [
+    entry(1, 'Elsewhere', q, '/body/DocFragment[3]/body/section[1]/p[2]/text()[1].0', '/body/DocFragment[3]/body/section[1]/p[2]/text()[1].36')
+  ] });
+  const r = decodeStore(written[0].bin).records[0];
+  assert.equal(r.spine, 2);
+  assert.equal(r.startOffset, cpIndex(rawText(CH_THREE), q));
+});
+
+test('add to reader: a file in a format it does not know is left alone', async () => {
+  const odd = Buffer.from(encodeStore({ title: 'B', author: 'A', path: BOOK_PATH }, []));
+  odd[0] = 9;
+  const { written, status, els } = await addToReader({ store: odd, entries: [entry(1, 'Chapter One', 'Opening words.')] });
+  assert.equal(written.length, 0);
+  assert.match(status, /^Could not add them: .*format this plugin does not know/);
+  assert.equal(els['bo-hl-status'].style.color, '#ff6b6b');
+  const cut = encodeStore({ title: 'B', author: 'A', path: BOOK_PATH }, [{ spine: 1, startOffset: 1, endOffset: 3, text: 'xyz' }]).subarray(0, 120);
+  const again = await addToReader({ store: cut, entries: [entry(1, 'Chapter One', 'Opening words.')] });
+  assert.equal(again.written.length, 0, 'a cut-off file is not rewritten either');
+});
+
+test('add to reader: a button press with no check done first does nothing', async () => {
+  const { els, writes } = await load({ existing: CONFIG, files: { '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') }, relay: bookOrbit() });
+  await els['bo-hl-list'].onclick(click('add'));
+  assert.equal(writes.length, 0);
+  assert.equal((els['bo-hl-status'] || {}).textContent || '', '');
+});
+
+test('add to reader: never duplicates, however the same passage is worded or how often it is pressed', async () => {
+  const q = 'We ended up hiring five mercenaries.';
+  const two = rawText(CH_TWO);
+  const start = cpIndex(two, q);
+  // The reader already has this passage, worded differently (no final full stop, different text).
+  const header = { title: 'Book', author: '', path: BOOK_PATH };
+  const store = encodeStore(header, [{ spine: 1, startOffset: start, endOffset: start + q.length - 1, text: 'We ended up hiring five mercenaries', chapter: 'Chapter Two' }]);
+  const same = await addToReader({ store, entries: [entry(1, 'Chapter Two', q), entry(2, 'Chapter Two', q + ' ')] });
+  assert.match(same.status, /^Nothing new to add to the reader\./);
+  assert.equal(same.written.length, 0);
+  // Two pulled entries for one passage add it once.
+  const twice = await addToReader({ entries: [entry(1, 'Chapter Two', q), entry(2, 'Chapter Two', q.replace('five', 'five  '))] });
+  assert.match(twice.status, /^Added 1 highlight to the reader\./);
+  assert.equal(decodeStore(twice.written[0].bin).records.length, 1);
+  // Pressing the button again without pulling again changes nothing the second time.
+  const epub = await makeEpub(CHAPTERS);
+  const files = { [BOOK_PATH]: epub, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') };
+  const { els, writes } = await load({ existing: CONFIG, files, relay: bookOrbit({ entries: [entry(1, 'Chapter Two', q)] }) });
+  els['bo-book'].value = BOOK_PATH;
+  await els['bo-hl-check'].onclick();
+  await els['bo-hl-list'].onclick(click('add'));
+  assert.doesNotMatch(els['bo-hl-list'].innerHTML, /data-act="add"/, 'nothing is left to add once it is on the reader');
+  await els['bo-hl-list'].onclick(click('add'));
+  assert.match(els['bo-hl-status'].textContent, /^Nothing new to add to the reader\./);
+  assert.equal(writes.filter((w) => w.p === STORE_PATH).length, 1);
+  // The reader's record is worded very differently but covers the same passage: it is still not added again.
+  const short = encodeStore(header, [{ spine: 1, startOffset: start, endOffset: start + q.length, text: 'hiring five', chapter: 'Chapter Two' }]);
+  const overlap = await addToReader({ store: short, entries: [entry(1, 'Chapter Two', q)] });
+  assert.match(overlap.status, /^Nothing new to add to the reader\./);
+  assert.match(overlap.status, /1 already on the reader/);
+  assert.equal(overlap.written.length, 0);
+});
+
+test('add to reader: its buttons are there only for highlights the reader lacks', async () => {
+  const q = 'Opening words.';
+  const { els } = await load({ existing: CONFIG, files: { [BOOK_PATH]: await makeEpub(CHAPTERS), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') },
+    relay: bookOrbit({ entries: [entry(1, 'Chapter One', q)] }) });
+  els['bo-book'].value = BOOK_PATH;
+  assert.equal(els['bo-hl-list'].innerHTML || '', '', 'nothing before the check');
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-list'].innerHTML, /data-act="add"/);
+  await els['bo-hl-list'].onclick(click('add'));
+  assert.doesNotMatch(els['bo-hl-list'].innerHTML, /data-act="add"/);
+  assert.match(els['bo-hl-list'].innerHTML, /On the reader and in BookOrbit \(1\)/);
+});
+
+test('check book: no highlights on the reader still confirms the book and says there are none', async () => {
+  const found = bookOrbit();
+  for (const files of [
+    { '/b.epub': Buffer.from('abc') },                                   // no /My Clippings.txt at all
+    { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': '' },          // an empty one
+    { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Some Other Book') }
+  ]) {
+    const { els } = await load({ existing: CONFIG, files, relay: found });
+    els['bo-book'].value = '/b.epub';
+    await els['bo-hl-check'].onclick();
+    assert.match(els['bo-hl-status'].textContent, /^BookOrbit has this exact file .*Neither BookOrbit nor the reader has highlights for this book yet/);
+    assert.equal(els['bo-hl-status'].style.color, '#f0a030');
+    assert.equal(els['bo-hl-list'].innerHTML, '');
+  }
+});
+
+test('check book: still says the book is missing from BookOrbit when there are no highlights', async () => {
+  const { els } = await load({ existing: CONFIG, files: { '/b.epub': Buffer.from('abc') },
+    relay: bookOrbit({ unmatched: true }) });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /^BookOrbit does not have this exact file/);
+  assert.equal(els['bo-hl-status'].style.color, '#ff6b6b');
+});
+
+test('a lost connection to the reader is explained instead of "Failed to fetch"', async () => {
+  const { els } = await load({ existing: CONFIG, files: {}, unreachable: ['/b.epub'], relay: async () => ({ status: 200, body: '{}' }) });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /^Could not finish: the page lost contact with the reader\. Check that File Transfer is still open/);
+  assert.equal(els['bo-hl-status'].style.color, '#ff6b6b');
+});
+
+// ---- Highlights on the reader that BookOrbit does not have --------------------------------------
+const A_TEXT = 'Kept in both places, a long enough highlight to match on.';
+const B_TEXT = 'Only on the reader, the first one.';
+const C_TEXT = 'Only on the reader, the second one.';
+const strayRecord = (text, over = {}) => Object.assign({ spine: 1, startOffset: 3, endOffset: 3 + text.length, text, chapter: 'Chapter Two' }, over);
+async function pullWithStore(records, { entries = [entry(1, 'Chapter Two', A_TEXT)], more = false, extra = {} } = {}) {
+  const store = encodeStore({ title: 'Book', author: '', path: BOOK_PATH }, records);
+  const files = { [BOOK_PATH]: Buffer.from('abc'), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book'), [STORE_PATH]: store, ...extra };
+  const loaded = await load({ existing: CONFIG, files, relay: bookOrbit({ entries, more }) });
+  loaded.els['bo-book'].value = BOOK_PATH;
+  await loaded.els['bo-hl-check'].onclick();
+  return { ...loaded, store, files };
+}
+
+test('strays: reader highlights BookOrbit does not have are listed with delete buttons', async () => {
+  const { els } = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT), strayRecord(C_TEXT)]);
+  const html = els['bo-hl-list'].innerHTML;
+  assert.match(html, /On the reader, not in BookOrbit \(2\)/);
+  assert.ok(html.includes(B_TEXT) && html.includes(C_TEXT));
+  assert.ok(html.indexOf(A_TEXT) > html.indexOf('On the reader and in BookOrbit'), 'a highlight BookOrbit has is listed under both, without buttons');
+  assert.match(html, /Delete all 2 from the reader/);
+  assert.match(html, /Send all 2 to BookOrbit/);
+  assert.equal((html.match(/Delete from the reader/g) || []).length, 2);
+  assert.equal((html.match(/Send to BookOrbit/g) || []).length, 2);
+});
+
+test('check: highlights are split into in BookOrbit only, on the reader only and on both', async () => {
+  const entries = [entry(1, 'Chapter Two', A_TEXT), entry(2, 'Chapter Two', B_TEXT), entry(3, 'Chapter Two', C_TEXT)];
+  const { els } = await pullWithStore([strayRecord(A_TEXT)], { entries });
+  const html = els['bo-hl-list'].innerHTML;
+  assert.match(html, /In BookOrbit, not on the reader yet \(2\)/);
+  assert.match(html, /Add all 2 to the reader/);
+  assert.match(html, /On the reader and in BookOrbit \(1\)/);
+  assert.doesNotMatch(html, /On the reader, not in BookOrbit/);
+  assert.ok(html.indexOf(B_TEXT) < html.indexOf('On the reader and in BookOrbit'), 'to-add ones come first');
+  assert.ok(html.indexOf('On the reader and in BookOrbit') < html.indexOf(A_TEXT), 'the one already there is listed under its own heading');
+});
+
+test('check: after Add to reader the highlight moves to on the reader and in BookOrbit', async () => {
+  const { els, writes } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const html = els['bo-hl-list'].innerHTML;
+  assert.match(html, /On the reader and in BookOrbit \(1\)/);
+  assert.doesNotMatch(html, /In BookOrbit, not on the reader yet/);
+});
+
+test('check: with nothing on the reader every BookOrbit highlight is marked to be added', async () => {
+  const { els } = await pullWithStore([], { entries: [entry(1, 'Chapter Two', A_TEXT)] });
+  assert.match(els['bo-hl-list'].innerHTML, /In BookOrbit, not on the reader yet \(1\)/);
+  assert.doesNotMatch(els['bo-hl-list'].innerHTML, /On the reader and in BookOrbit/);
+});
+
+test('strays: nothing is offered to delete or send when the reader and BookOrbit agree', async () => {
+  const same = await pullWithStore([strayRecord(A_TEXT)]);
+  assert.match(same.els['bo-hl-list'].innerHTML, /On the reader and in BookOrbit \(1\)/);
+  assert.doesNotMatch(same.els['bo-hl-list'].innerHTML, /data-act/);
+  assert.match(same.els['bo-hl-status'].textContent, /Everything is in sync\./);
+  const none = await pullWithStore([]);
+  assert.doesNotMatch(none.els['bo-hl-list'].innerHTML, /data-act="(del|send)"/);
+});
+
+test('strays: a delete needs a second click, then removes only that highlight, with a backup', async () => {
+  const { els, writes, relays, store } = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT), strayRecord(C_TEXT)]);
+  const before = relays.length;
+  await els['bo-hl-list'].onclick(click('del', '0'));
+  assert.match(els['bo-hl-list'].innerHTML, /Click again to delete/);
+  assert.equal(writes.filter((w) => w.p === STORE_PATH).length, 0, 'the first click changes nothing');
+  await els['bo-hl-list'].onclick(click('del', '0'));
+  const out = writes.filter((w) => w.p === STORE_PATH);
+  assert.equal(out.length, 1);
+  assert.deepEqual(decodeStore(out[0].bin).records.map((r) => r.text), [A_TEXT, C_TEXT]);
+  const backup = writes.find((w) => w.p === '/plugins/bookorbit-sync/backup-epub_2361001545.bin');
+  assert.ok(backup && backup.bin.equals(store), 'the old file is kept as it was');
+  assert.match(els['bo-hl-status'].textContent, /^Deleted 1 highlight from the reader\. BookOrbit was not changed\./);
+  assert.equal(els['bo-hl-status'].style.color, '#3fb950');
+  assert.equal(relays.length, before, 'nothing is sent to BookOrbit');
+  assert.ok(!els['bo-hl-list'].innerHTML.includes(B_TEXT), 'the deleted one is gone from the list');
+  assert.ok(els['bo-hl-list'].innerHTML.includes(C_TEXT));
+});
+
+const clipEntry = (title, text) => title + ' (A)\r\n- Your Highlight on Page 3 | Chapter Two | Added on Monday, 1 January 2024 10:00:00\r\n\r\n' + text + '\r\n==========\r\n';
+
+test('strays: deleting also removes that book\'s matching entries from My Clippings.txt, with a backup', async () => {
+  const clips = clipEntry('Book', A_TEXT) + clipEntry('Book', B_TEXT) + clipEntry('Other Book', B_TEXT) + clipEntry('Book', C_TEXT);
+  const { els, writes } = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT), strayRecord(C_TEXT)], { extra: { '/My Clippings.txt': clips } });
+  await els['bo-hl-list'].onclick(click('del', '0'));
+  await els['bo-hl-list'].onclick(click('del', '0'));
+  const out = writes.find((w) => w.p === '/My Clippings.txt');
+  assert.equal(out.bin.toString('utf8'), clipEntry('Book', A_TEXT) + clipEntry('Other Book', B_TEXT) + clipEntry('Book', C_TEXT));
+  const backup = writes.find((w) => w.p === '/plugins/bookorbit-sync/backup-My Clippings.txt');
+  assert.equal(backup.bin.toString('utf8'), clips);
+  assert.match(els['bo-hl-status'].textContent, /My Clippings\.txt: removed 1 entry\./);
+});
+
+test('strays: My Clippings.txt is left alone when nothing in it matches or it does not exist', async () => {
+  const clips = clipEntry('Book', A_TEXT);
+  const a = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT)], { extra: { '/My Clippings.txt': clips } });
+  await a.els['bo-hl-list'].onclick(click('del', '0'));
+  await a.els['bo-hl-list'].onclick(click('del', '0'));
+  assert.equal(a.writes.filter((w) => w.p === '/My Clippings.txt').length, 0);
+  const b = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT)]);
+  await b.els['bo-hl-list'].onclick(click('del', '0'));
+  await b.els['bo-hl-list'].onclick(click('del', '0'));
+  assert.match(b.els['bo-hl-status'].textContent, /^Deleted 1 highlight from the reader\. BookOrbit was not changed\./);
+});
+
+test('strays: delete all removes every highlight BookOrbit lacks and leaves the rest byte for byte', async () => {
+  const { els, writes, store } = await pullWithStore([strayRecord(B_TEXT), strayRecord(A_TEXT), strayRecord(C_TEXT)]);
+  await els['bo-hl-list'].onclick(click('del'));
+  await els['bo-hl-list'].onclick(click('del'));
+  const out = decodeStore(writes.find((w) => w.p === STORE_PATH).bin);
+  assert.deepEqual(out.records.map((r) => r.text), [A_TEXT]);
+  assert.match(els['bo-hl-status'].textContent, /^Deleted 2 highlights from the reader/);
+  assert.match(els['bo-hl-list'].innerHTML, /On the reader and in BookOrbit \(1\)/);
+  assert.doesNotMatch(els['bo-hl-list'].innerHTML, /On the reader, not in BookOrbit/);
+  const keptBytes = encodeStore({ title: 'Book', author: '', path: BOOK_PATH }, [strayRecord(A_TEXT)]);
+  assert.ok(writes.find((w) => w.p === STORE_PATH).bin.equals(keptBytes));
+  void store;
+});
+
+test('strays: a different button between the two clicks cancels the first', async () => {
+  const { els, writes } = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT), strayRecord(C_TEXT)]);
+  await els['bo-hl-list'].onclick(click('del', '0'));
+  await els['bo-hl-list'].onclick(click('del', '1'));
+  assert.equal(writes.filter((w) => w.p === STORE_PATH).length, 0, 'two different buttons never delete anything');
+});
+
+test('strays: highlights synced to a CrossPoint sync server are left for the reader to delete', async () => {
+  const { els } = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT, { id: 'abc-123' })]);
+  const html = els['bo-hl-list'].innerHTML;
+  assert.ok(!html.includes('Delete from the reader'));
+  assert.match(html, /1 of these is synced to a CrossPoint sync server/);
+});
+
+test('strays: no comparison is made when BookOrbit has more than could be listed', async () => {
+  const { els } = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT)], { more: true });
+  assert.match(els['bo-hl-list'].innerHTML, /cannot be compared safely/);
+  assert.ok(!els['bo-hl-list'].innerHTML.includes('Delete'));
+});
+
+test('strays: a file in a format it does not know is never changed', async () => {
+  const odd = encodeStore({ title: 'B', author: '', path: BOOK_PATH }, [strayRecord(B_TEXT)]);
+  odd[0] = 9;
+  const bad = await load({ existing: CONFIG, files: { [BOOK_PATH]: Buffer.from('abc'), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book'), [STORE_PATH]: odd },
+    relay: bookOrbit({ entries: [entry(1, 'C', A_TEXT)] }) });
+  bad.els['bo-book'].value = BOOK_PATH;
+  await bad.els['bo-hl-check'].onclick();
+  assert.doesNotMatch(bad.els['bo-hl-list'].innerHTML, /data-act="del"/, 'nothing can be deleted from a file it cannot read');
+  assert.equal(bad.writes.filter((w) => w.p === STORE_PATH).length, 0);
+});
+
+test('send: highlights deleted on the reader are not offered again', async () => {
+  const store = encodeStore({ title: 'Dune', author: '', path: BOOK_PATH }, [strayRecord('First quote')]);
+  const { els, relays } = await load({
+    existing: CONFIG,
+    files: { [BOOK_PATH]: Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Dune'), [STORE_PATH]: store },
+    relay: bookOrbit({ upserted: 1 })
+  });
+  els['bo-book'].value = BOOK_PATH;
+  await checkAndSend(els);
+  const sent = JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body).books[0].annotations;
+  assert.deepEqual(sent.map((a) => a.text), ['First quote']);
+  // Everything deleted: there is nothing to offer at all.
+  const empty = encodeStore({ title: 'Dune', author: '', path: BOOK_PATH }, []);
+  const again = await load({ existing: CONFIG, files: { [BOOK_PATH]: Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Dune'), [STORE_PATH]: empty },
+    relay: bookOrbit() });
+  again.els['bo-book'].value = BOOK_PATH;
+  await checkAndSend(again.els);
+  assert.match(again.els['bo-hl-status'].textContent, /Neither BookOrbit nor the reader has highlights/);
+  assert.equal(again.relays.filter((r) => r.u.endsWith('/annotations')).length, 0);
+});
+
+test('check and send: highlights only in the reader\'s own file (no /My Clippings.txt) are still found', async () => {
+  const store = encodeStore({ title: 'Dune', author: '', path: BOOK_PATH }, [strayRecord('Added by the plugin, only in the reader file.')]);
+  const files = { [BOOK_PATH]: Buffer.from('abc'), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Dune'), [STORE_PATH]: store };
+  const a = await load({ existing: CONFIG, files, relay: bookOrbit({ upserted: 1 }) });
+  a.els['bo-book'].value = BOOK_PATH;
+  await a.els['bo-hl-check'].onclick();
+  assert.match(a.els['bo-hl-status'].textContent, /the reader has 1\./);
+  assert.ok(a.els['bo-hl-list'].innerHTML.includes('Added by the plugin, only in the reader file.'));
+  await a.els['bo-hl-list'].onclick(click('send'));
+  const sent = JSON.parse(a.relays.find((r) => r.u.endsWith('/annotations')).body).books[0].annotations;
+  assert.deepEqual(sent.map((s) => s.text), ['Added by the plugin, only in the reader file.']);
+});
+
+test('send: with no highlight file on the reader, /My Clippings.txt is used as before', async () => {
+  const { els, relays } = await load({
+    existing: CONFIG, files: { [BOOK_PATH]: Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Dune') },
+    relay: bookOrbit({ upserted: 2 })
+  });
+  els['bo-book'].value = BOOK_PATH;
+  await checkAndSend(els);
+  assert.equal(JSON.parse(relays.find((r) => r.u.endsWith('/annotations')).body).books[0].annotations.length, 2);
+});
+
+test('send: what was sent moves to on the reader and in BookOrbit, and a single highlight can be sent alone', async () => {
+  const sentOnce = [];
+  const base = bookOrbit({ upserted: 1 });
+  let known = [];
+  const relay = async (m, u, h, body) => {
+    if (u.endsWith('/annotations/exchange')) {
+      return { status: 201, body: JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: known, edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }) };
+    }
+    if (u.endsWith('/annotations')) { sentOnce.push(...JSON.parse(body).books[0].annotations); known = sentOnce.map((a, i) => add(i + 1, a.pageno, a.chapter, a.text)); }
+    return base(m, u, h, body);
+  };
+  const { els } = await load({
+    existing: CONFIG, files: { [BOOK_PATH]: Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Dune') }, relay });
+  els['bo-book'].value = BOOK_PATH;
+  await els['bo-hl-check'].onclick();
+  await els['bo-hl-list'].onclick(click('send', '1'));
+  assert.deepEqual(sentOnce.map((a) => a.text), ['Fear is the mind-killer.\nSecond line.']);
+  const html = els['bo-hl-list'].innerHTML;
+  assert.match(html, /On the reader, not in BookOrbit \(1\)/);
+  assert.match(html, /On the reader and in BookOrbit \(1\)/);
+  assert.match(els['bo-hl-status'].textContent, /^Sent\. 1 new/);
 });

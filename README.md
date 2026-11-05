@@ -20,14 +20,21 @@ Not affiliated with CrossPoint or BookOrbit.
 - **Reading sessions.** Every reading session on the reader is sent to BookOrbit,
   so the reading log, streaks and stats update. This happens by itself, with no
   button to press.
-- **Send highlights.** Highlights you make on the reader are sent to BookOrbit,
-  each with a real position in the book, so BookOrbit's web reader opens the
-  highlight at the right spot ("Open at this page") instead of showing "Anchor
-  lost".
-- **Pull highlights.** Highlights that BookOrbit holds for a book, including ones
-  made in its web reader or on another device, are listed on the settings page
-  and can be saved to the reader as a text file named
-  `BOOK NAME - AUTHOR Highlights.txt`, so you can read them on the device.
+- **Two-way highlight sync.** Highlights go both ways: the reader's to BookOrbit
+  and BookOrbit's to the reader. Nothing is duplicated. It runs when you press
+  **Check book** on the settings page and then choose what to do, not in the
+  background.
+- **One screen.** **Check book** confirms BookOrbit has the file, then lists the
+  book's highlights in three groups: in BookOrbit but not on the reader (**Add to
+  reader**), on the reader but not in BookOrbit (**Send to BookOrbit** or
+  **Delete from the reader**), and on both. Every button works on one highlight
+  or on the whole group.
+- **BookOrbit is the source of truth.** A highlight that is on the reader but not
+  in BookOrbit can be sent to BookOrbit or deleted from the reader. Deleting only
+  ever touches the reader; BookOrbit is never changed by it.
+- **Real positions.** Highlights sent to BookOrbit get a real position in the
+  book, so BookOrbit's web reader opens the highlight at the right spot ("Open at
+  this page") instead of showing "Anchor lost".
 - **Choose a book from a list.** The settings page offers the books you opened
   recently on the reader, so you do not need to type a path.
 
@@ -68,7 +75,7 @@ settings card.
   `reader.session` plugin event. Older firmware ignores the event and nothing is
   sent.
 - A reader with a clock chip: **Settings has a Clock option** (for example the
-  Xteink X3 and X4 Pro). Readers without one, such as the X4C, are not supported;
+  Xteink X3 and X4 Pro). Readers without one, such as the original Xteink X4, are not supported;
   see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 - A BookOrbit server you can reach from the reader's WiFi, and a **KOReader sync**
   login for it (BookOrbit: Settings, Devices & Sync, KOReader). This is separate
@@ -136,22 +143,24 @@ background.
    newest is selected for you. For any other book choose **Another book (type its
    path)** and enter its path on the SD card, for example
    `/Books/Author/Title.epub`.
-2. **Check book.** Confirms BookOrbit has this exact file, and lists the
-   highlights the reader has for the book so you can look them over. Nothing is
-   sent.
-3. **Send highlights.** Sends every highlight the reader has for the selected
-   book, and only that book. Highlights BookOrbit already has are skipped, so
-   pressing it again is safe. The result tells you how many were new, how many
-   were found in the book, and whether any matched text that appears more than
-   once.
-4. **Pull highlights.** Lists the highlights BookOrbit has for the book, sorted
-   by page, with chapter, page and notes. Press **Save as text file** to write
-   `BOOK NAME - AUTHOR Highlights.txt` into the same folder as the book. The name
-   comes from the EPUB's own title and author. Pulling does not change anything
-   in the reader's own highlights.
+2. **Check book.** Confirms BookOrbit has this exact file and reads its
+   highlights for the book. If the file is not in BookOrbit it stops there.
+   Otherwise it compares them with the reader's and shows three groups. Nothing
+   is changed until you press a button.
+   - **In BookOrbit, not on the reader yet.** **Add to reader** (per highlight,
+     or **Add all**) puts them in the reader's own highlight file for the book
+     and writes matching entries to `/My Clippings.txt` in the reader's own
+     format (creating it if it is missing).
+   - **On the reader, not in BookOrbit.** **Send to BookOrbit** (per highlight,
+     or **Send all**) adds them to BookOrbit; the result says how many were new,
+     how many were found in the book, and whether any matched text that appears
+     more than once. **Delete from the reader** (per highlight, or **Delete
+     all**) removes them from the reader; each delete needs a second press to
+     confirm. Highlights synced to a CrossPoint sync server cannot be deleted
+     here and have to be deleted on the reader.
+   - **On the reader and in BookOrbit.** Nothing to do.
 
-The list on the page clears when you press any other button or choose another
-book; **Save as text file** keeps it.
+The list clears when you press Check book again or choose another book.
 
 **Colours of the result box:** green is success, orange means nothing was wrong
 but nothing was sent (for example everything is already in BookOrbit, or the
@@ -161,8 +170,10 @@ book has no highlights), red is a problem.
 
 - The reader exports your highlights to `/My Clippings.txt`. The plugin reads
   that file and picks the highlights whose book title matches the selected book
-  (the title inside the EPUB, or the one in the reader's recent list). If nothing
-  matches, nothing is sent.
+  (the title inside the EPUB, or the one in the reader's recent list), then
+  keeps the ones still in the reader's own highlight file. Highlights that only
+  the reader's own file has (for example ones added by this plugin) are included
+  too, so a missing `/My Clippings.txt` does not hide them.
 - BookOrbit's web reader needs a KOReader-style position for each highlight. The
   reader does not store one in that form, so the plugin reads the EPUB through
   the reader's web server, finds the highlighted text in the book, and builds the
@@ -173,7 +184,26 @@ book has no highlights), red is a problem.
   lost" in BookOrbit's web reader.
 - Highlights are only accepted for the exact file BookOrbit has. The result says
   so if the file differs.
-- Pulling uses BookOrbit's KOReader annotation exchange, as if the reader were an
+- Deleting from the reader removes the highlight from the same file. BookOrbit
+  is not touched. Before the plugin changes that file it saves a copy of it as
+  `backup-epub_<number>.bin` in the plugin's folder (one copy per book, replaced
+  each time). A highlight is treated as being in BookOrbit when its text matches,
+  allowing for small differences in spacing or quotes. The reader's
+  `/My Clippings.txt` only ever grows when you delete on the reader itself, so
+  a highlight deleted on the reader is not offered for sending again. When this plugin deletes a
+  highlight it also removes that book's matching entries from
+  `/My Clippings.txt` (a copy is saved as `backup-My Clippings.txt` first).
+- Add to reader writes the reader's own highlight file for the book,
+  `/.crosspoint/clippings/epub_<number>.bin`, where the number is a hash of the
+  book's path that the plugin works out the same way the firmware does. Each
+  highlight is placed by its chapter and by how many characters of the chapter's
+  text come before it. The plugin uses BookOrbit's own position when it gives one
+  that really covers the highlighted text, and otherwise searches the book. A
+  highlight is skipped if its text is not found, or appears more than once with no
+  exact position, so it is never put in a guessed place. Existing highlights in the
+  file are copied as they are, and nothing is written when there is nothing new.
+  The reader holds at most 256 highlights per book (more on some models).
+- Check book reads BookOrbit's highlights with its KOReader annotation exchange, as if the reader were an
   empty copy of the book that asks for everything. Each page of results is
   acknowledged so the next page follows.
 
