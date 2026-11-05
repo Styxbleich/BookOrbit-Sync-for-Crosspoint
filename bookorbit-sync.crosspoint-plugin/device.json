@@ -1,6 +1,6 @@
 {
   "title": "BookOrbit Sync",
-  "description": "Sends reading sessions and highlights to your BookOrbit server. Set up on the reader's web page.",
+  "description": "Syncs highlights both ways and sends sessions to BookOrbit. Set up on the web page.",
   "config": {
     "file": "config.json"
   },

@@ -20,6 +20,10 @@ Not affiliated with CrossPoint or BookOrbit.
 - **Reading sessions.** Every reading session on the reader is sent to BookOrbit,
   so the reading log, streaks and stats update. This happens by itself, with no
   button to press.
+- **Two-way highlight sync.** Highlights go both ways: the reader's to BookOrbit
+  (**Send highlights**) and BookOrbit's to the reader (**Add to reader**).
+  Nothing is duplicated, and both run when you press the button on the settings
+  page, not in the background.
 - **Send highlights.** Highlights you make on the reader are sent to BookOrbit,
   each with a real position in the book, so BookOrbit's web reader opens the
   highlight at the right spot ("Open at this page") instead of showing "Anchor

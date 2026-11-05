@@ -1,14 +1,15 @@
 BookOrbit Sync
 
-Sends your reading sessions and highlights to your own BookOrbit server.
-Made with AI, may contain errors.
+Sends your reading sessions to your own BookOrbit server and syncs highlights
+both ways. Made with AI, may contain errors.
 
 How it works
 Reading sessions are recorded on the reader as you read. They are sent to
 BookOrbit the next time the reader goes online, for example when you use
 Sync progress. Nothing to press.
 
-Highlights are handled from the web interface, below.
+Highlights sync both ways from the web interface, below: the reader's go to
+BookOrbit, and BookOrbit's can be added to the reader.
 
 Using the web interface
 1. On the reader, open File Transfer and browse to the address it shows,
