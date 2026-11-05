@@ -163,9 +163,8 @@ a button; it is not automatic, because plugin events cannot read files.
   numbers matched the reader's exactly), but nothing else is tested on a reader
   yet. Things that may differ: chapters with scripts, hidden text or unusual
   markup, and firmware versions newer than the one checked. A file it does not
-  recognise is left untouched. If the book is open on the reader while you press
-  the button, the reader keeps its old copy in memory; close the book first. Make
-  a copy of `/.crosspoint/clippings/` on the SD card before trying it.
+  recognise is left untouched. Make a copy of `/.crosspoint/clippings/` on the
+  SD card before trying it.
 - **Slow on big books.** The EPUB is read through the reader's web server, one
   chapter at a time in your browser, so large books can take a while.
 - **Recent books only.** The dropdown is the reader's list of its last 10 opened

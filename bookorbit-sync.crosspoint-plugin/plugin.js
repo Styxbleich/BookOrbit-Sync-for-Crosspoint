@@ -615,9 +615,16 @@ CrossPoint.registerPlugin(async (container, api) => {
     'for example when you use the long-press or menu Sync progress action. ' +
     'This plugin was made with AI assistance and may contain errors.</p>' +
     '<details id="bo-hl"><summary style="cursor:pointer"><strong>Highlights</strong></summary>' +
-    '<p>Sends this book\'s highlights from <code>/My Clippings.txt</code> to BookOrbit. ' +
-    'Pick the book below. Highlights only sync when the file is ' +
-    'identical to the one in BookOrbit. Reading the book file can take a while on the reader.</p>' +
+    '<p>Pick a book, then use the buttons. The book must be the same file BookOrbit has. ' +
+    'Reading it can take a while.</p>' +
+    '<ul style="margin:0 0 12px;padding-left:1.2em;line-height:1.5">' +
+    '<li><strong>Check book:</strong> confirms BookOrbit has this file and lists the reader\'s highlights for it.</li>' +
+    '<li><strong>Send highlights:</strong> sends the reader\'s highlights for this book to BookOrbit. ' +
+    'Ones it already has are skipped.</li>' +
+    '<li><strong>Pull highlights:</strong> lists the highlights BookOrbit has for this book.</li>' +
+    '<li><strong>Add to reader:</strong> after a pull, adds them to the reader\'s own highlights (experimental).</li>' +
+    '<li><strong>Save as text file:</strong> after a pull, saves them as a text file next to the book.</li>' +
+    '</ul>' +
     '<div class="setting-row" id="bo-recent-row" style="display:none"><span class="setting-name">Recent books</span>' +
     '<span class="setting-control"><select id="bo-recent" style="width:100%"></select></span></div>' +
     '<div class="setting-row" id="bo-book-row"><span class="setting-name">Book file</span>' +
@@ -627,8 +634,8 @@ CrossPoint.registerPlugin(async (container, api) => {
     '<button type="button" id="bo-hl-check">Check book</button> ' +
     '<button type="button" id="bo-hl-send">Send highlights</button> ' +
     '<button type="button" id="bo-hl-pull">Pull highlights</button> ' +
-    '<button type="button" id="bo-hl-save" disabled>Save as text file</button> ' +
-    '<button type="button" id="bo-hl-add" disabled>Add to reader</button></span></div>' +
+    '<button type="button" id="bo-hl-add" disabled>Add to reader</button> ' +
+    '<button type="button" id="bo-hl-save" disabled>Save as text file</button></span></div>' +
     '<p id="bo-hl-status" style="color:#666"></p>' +
     '<div id="bo-hl-list"></div></details>' +
     '</details>';
@@ -1111,8 +1118,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       for (const byte of out) bin += String.fromCharCode(byte);
       const written = await api.writeFile(storePath, btoa(bin));
       if (written && written.ok === false) throw new Error(written.error || 'the reader could not write the file');
-      hlStatus('Added ' + fresh.length + ' highlight' + (fresh.length === 1 ? '' : 's') + ' to the reader.' + tail +
-        ' Close the book on the reader (go to the home screen) and open it again to see them.', false, true);
+      hlStatus('Added ' + fresh.length + ' highlight' + (fresh.length === 1 ? '' : 's') + ' to the reader.' + tail, false, true);
     } catch (e) {
       hlStatus('Could not add them: ' + (e && e.message ? e.message : e), true);
     } finally {

@@ -155,9 +155,7 @@ background.
    in the reader's own highlights.
 
 5. **Add to reader.** Available after a pull. Adds the pulled highlights to the
-   reader's own highlight file for the book. Close the book on the reader (go to
-   its home screen) first, and open it again afterwards. This is experimental, see
-   below.
+   reader's own highlight file for the book. This is experimental, see below.
 
 The list on the page clears when you press any other button or choose another
 book; **Save as text file** and **Add to reader** keep it.
