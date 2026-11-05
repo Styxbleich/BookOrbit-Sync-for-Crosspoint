@@ -13,7 +13,7 @@ import { DOMParser } from 'linkedom';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(here, '..', 'bookorbit-sync.crosspoint-plugin', 'plugin.js'), 'utf8');
 
-async function load({ existing = null, device = null, events = null, relay, files = {} }) {
+async function load({ existing = null, device = null, events = null, relay, files = {}, unreachable = [] }) {
   const els = {};
   const getEl = (id) => (els[id] ||= { id, value: '', placeholder: '', textContent: '', style: {}, disabled: false });
   const document = { getElementById: getEl };
@@ -26,6 +26,7 @@ async function load({ existing = null, device = null, events = null, relay, file
     CrossPoint: { registerPlugin: (fn) => { register = fn; } },
     fetch: async (url) => {
       const asked = url.startsWith('/download?path=') ? decodeURIComponent(url.slice('/download?path='.length)) : null;
+      if (asked !== null && unreachable.includes(asked)) throw new TypeError('Failed to fetch');
       if (asked !== null && files[asked] !== undefined) {
         const f = files[asked];
         const buf = Buffer.isBuffer(f) ? f : Buffer.from(f, 'utf8');
@@ -300,7 +301,7 @@ test('highlights: book hash matches KOReader partial md5 for many sizes', async 
     await els['bo-hl-check'].onclick();
     const body = JSON.parse(relays[0].body);
     assert.deepEqual(body.hashes, [refPartialMd5(epub)], 'size ' + n);
-    assert.match(els['bo-hl-status'].textContent, /Highlights can sync/);
+    assert.match(els['bo-hl-status'].textContent, /BookOrbit has this exact file/);
   }
 });
 
@@ -956,4 +957,37 @@ test('add to reader: the button stays greyed out until highlights have been pull
   assert.equal(els['bo-hl-add'].disabled, false, 'enabled after a pull that found highlights');
   await els['bo-hl-check'].onclick();
   assert.equal(els['bo-hl-add'].disabled, true, 'greyed out again when another button clears the list');
+});
+
+test('check book: no highlights on the reader still confirms the book and says there are none', async () => {
+  const found = async (m, u) => ({ status: 200, body: JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }] }) });
+  for (const files of [
+    { '/b.epub': Buffer.from('abc') },                                   // no /My Clippings.txt at all
+    { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': '' },          // an empty one
+    { '/b.epub': Buffer.from('abc'), '/My Clippings.txt': CLIPS, '/.crosspoint/recent.json': rec('/b.epub', 'Some Other Book') }
+  ]) {
+    const { els } = await load({ existing: CONFIG, files, relay: found });
+    els['bo-book'].value = '/b.epub';
+    await els['bo-hl-check'].onclick();
+    assert.match(els['bo-hl-status'].textContent, /^BookOrbit has this exact file .*The reader has no highlights for this book yet/);
+    assert.equal(els['bo-hl-status'].style.color, '#f0a030');
+    assert.match(els['bo-hl-list'].innerHTML || els['bo-hl-list'].textContent || '', /No highlights for this book were found on the reader yet/);
+  }
+});
+
+test('check book: still says the book is missing from BookOrbit when there are no highlights', async () => {
+  const { els } = await load({ existing: CONFIG, files: { '/b.epub': Buffer.from('abc') },
+    relay: async () => ({ status: 200, body: JSON.stringify({ matches: [] }) }) });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /^BookOrbit does not have this exact file/);
+  assert.equal(els['bo-hl-status'].style.color, '#ff6b6b');
+});
+
+test('a lost connection to the reader is explained instead of "Failed to fetch"', async () => {
+  const { els } = await load({ existing: CONFIG, files: {}, unreachable: ['/b.epub'], relay: async () => ({ status: 200, body: '{}' }) });
+  els['bo-book'].value = '/b.epub';
+  await els['bo-hl-check'].onclick();
+  assert.match(els['bo-hl-status'].textContent, /^Could not finish: the page lost contact with the reader\. Check that File Transfer is still open/);
+  assert.equal(els['bo-hl-status'].style.color, '#ff6b6b');
 });

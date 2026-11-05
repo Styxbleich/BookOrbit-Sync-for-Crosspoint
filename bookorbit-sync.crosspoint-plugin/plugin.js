@@ -543,6 +543,14 @@ CrossPoint.registerPlugin(async (container, api) => {
     return !!n(a) && n(a) === n(b);
   };
 
+  // A browser's "Failed to fetch" means the page could not talk to the reader at all.
+  const whyFailed = (e) => {
+    const message = e && e.message ? e.message : String(e);
+    return /failed to fetch|networkerror|load failed/i.test(message)
+      ? 'the page lost contact with the reader. Check that File Transfer is still open on the reader (it may have gone to sleep), reload this page and try again.'
+      : message;
+  };
+
   async function readText(path) {
     try {
       const response = await fetch('/download?path=' + encodeURIComponent(path));
@@ -934,10 +942,14 @@ CrossPoint.registerPlugin(async (container, api) => {
         } else {
           showList('No highlights for this book were found on the reader yet.', []);
         }
+        if (!mine.length) {
+          return hlStatus('BookOrbit has this exact file (hash ' + hash + '). The reader has no highlights for this book yet, so there is nothing to send.',
+            false, false, true);
+        }
         return hlStatus('BookOrbit has this exact file (hash ' + hash + '). Highlights can sync.', false, true);
       }
     } catch (e) {
-      hlStatus('Could not finish: ' + (e && e.message ? e.message : e), true);
+      hlStatus('Could not finish: ' + whyFailed(e), true);
     } finally {
       $('bo-hl-check').disabled = $('bo-hl-send').disabled = false;
     }
@@ -1049,7 +1061,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       hlStatus('Got ' + entries.length + ' highlight' + (entries.length === 1 ? '' : 's') + ' from BookOrbit. ' +
         'Save as text file writes "' + pulled.file + '" to the reader. Add to reader puts them in the reader\'s own highlights for the book.', false, true);
     } catch (e) {
-      hlStatus('Could not finish: ' + (e && e.message ? e.message : e), true);
+      hlStatus('Could not finish: ' + whyFailed(e), true);
     } finally {
       $('bo-hl-check').disabled = $('bo-hl-send').disabled = $('bo-hl-pull').disabled = false;
       $('bo-hl-save').disabled = $('bo-hl-add').disabled = !pulled;
@@ -1120,7 +1132,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       if (written && written.ok === false) throw new Error(written.error || 'the reader could not write the file');
       hlStatus('Added ' + fresh.length + ' highlight' + (fresh.length === 1 ? '' : 's') + ' to the reader.' + tail, false, true);
     } catch (e) {
-      hlStatus('Could not add them: ' + (e && e.message ? e.message : e), true);
+      hlStatus('Could not add them: ' + whyFailed(e), true);
     } finally {
       ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull'].forEach((id) => { $(id).disabled = false; });
       $('bo-hl-save').disabled = $('bo-hl-add').disabled = !pulled;
@@ -1141,7 +1153,7 @@ CrossPoint.registerPlugin(async (container, api) => {
       if (written && written.ok === false) throw new Error(written.error || 'the reader could not write the file');
       hlStatus('Saved ' + pulled.entries.length + ' highlight' + (pulled.entries.length === 1 ? '' : 's') + ' to ' + pulled.file + '.' + note, false, true);
     } catch (e) {
-      hlStatus('Could not save: ' + (e && e.message ? e.message : e), true);
+      hlStatus('Could not save: ' + whyFailed(e), true);
     }
   }
 
