@@ -194,8 +194,11 @@ book has no highlights), red is a problem.
   `backup-epub_<number>.bin` in the plugin's folder (one copy per book, replaced
   each time). A highlight is treated as being in BookOrbit when its text matches,
   allowing for small differences in spacing or quotes. The reader's
-  `/My Clippings.txt` only ever grows, so Send highlights ignores anything that is
-  no longer in the reader's own highlights; a deleted highlight is not sent again.
+  `/My Clippings.txt` only ever grows when you delete on the reader itself, so
+  Send highlights ignores anything that is no longer in the reader's own
+  highlights; a deleted highlight is not sent again. When this plugin deletes a
+  highlight it also removes that book's matching entries from
+  `/My Clippings.txt` (a copy is saved as `backup-My Clippings.txt` first).
 - Add to reader writes the reader's own highlight file for the book,
   `/.crosspoint/clippings/epub_<number>.bin`, where the number is a hash of the
   book's path that the plugin works out the same way the firmware does. Each

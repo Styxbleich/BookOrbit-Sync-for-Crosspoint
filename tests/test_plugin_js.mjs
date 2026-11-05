@@ -999,9 +999,9 @@ const C_TEXT = 'Only on the reader, the second one.';
 const strayRecord = (text, over = {}) => Object.assign({ spine: 1, startOffset: 3, endOffset: 3 + text.length, text, chapter: 'Chapter Two' }, over);
 const click = (act, id = '') => ({ target: { getAttribute: (n) => ({ 'data-act': act, 'data-id': id })[n] } });
 
-async function pullWithStore(records, { entries = [entry(1, 'Chapter Two', A_TEXT)], more = false } = {}) {
+async function pullWithStore(records, { entries = [entry(1, 'Chapter Two', A_TEXT)], more = false, extra = {} } = {}) {
   const store = encodeStore({ title: 'Book', author: '', path: BOOK_PATH }, records);
-  const files = { [BOOK_PATH]: Buffer.from('abc'), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book'), [STORE_PATH]: store };
+  const files = { [BOOK_PATH]: Buffer.from('abc'), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book'), [STORE_PATH]: store, ...extra };
   const body = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: entries, edit: [], delete: [] }, more }], unmatched: [], positionIncompatible: [] });
   const loaded = await load({ existing: CONFIG, files, relay: async () => ({ status: 201, body }) });
   loaded.els['bo-book'].value = BOOK_PATH;
@@ -1043,6 +1043,32 @@ test('strays: a delete needs a second click, then removes only that highlight, w
   assert.equal(relays.length, before, 'nothing is sent to BookOrbit');
   assert.ok(!els['bo-hl-strays'].innerHTML.includes(B_TEXT), 'the deleted one is gone from the list');
   assert.ok(els['bo-hl-strays'].innerHTML.includes(C_TEXT));
+});
+
+const clipEntry = (title, text) => title + ' (A)\r\n- Your Highlight on Page 3 | Chapter Two | Added on Monday, 1 January 2024 10:00:00\r\n\r\n' + text + '\r\n==========\r\n';
+
+test('strays: deleting also removes that book\'s matching entries from My Clippings.txt, with a backup', async () => {
+  const clips = clipEntry('Book', A_TEXT) + clipEntry('Book', B_TEXT) + clipEntry('Other Book', B_TEXT) + clipEntry('Book', C_TEXT);
+  const { els, writes } = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT), strayRecord(C_TEXT)], { extra: { '/My Clippings.txt': clips } });
+  await els['bo-hl-strays'].onclick(click('one', '0'));
+  await els['bo-hl-strays'].onclick(click('one', '0'));
+  const out = writes.find((w) => w.p === '/My Clippings.txt');
+  assert.equal(out.bin.toString('utf8'), clipEntry('Book', A_TEXT) + clipEntry('Other Book', B_TEXT) + clipEntry('Book', C_TEXT));
+  const backup = writes.find((w) => w.p === '/plugins/bookorbit-sync/backup-My Clippings.txt');
+  assert.equal(backup.bin.toString('utf8'), clips);
+  assert.match(els['bo-hl-status'].textContent, /Removed 1 matching entry from My Clippings\.txt\./);
+});
+
+test('strays: My Clippings.txt is left alone when nothing in it matches or it does not exist', async () => {
+  const clips = clipEntry('Book', A_TEXT);
+  const a = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT)], { extra: { '/My Clippings.txt': clips } });
+  await a.els['bo-hl-strays'].onclick(click('one', '0'));
+  await a.els['bo-hl-strays'].onclick(click('one', '0'));
+  assert.equal(a.writes.filter((w) => w.p === '/My Clippings.txt').length, 0);
+  const b = await pullWithStore([strayRecord(A_TEXT), strayRecord(B_TEXT)]);
+  await b.els['bo-hl-strays'].onclick(click('one', '0'));
+  await b.els['bo-hl-strays'].onclick(click('one', '0'));
+  assert.match(b.els['bo-hl-status'].textContent, /^Deleted 1 highlight from the reader\. BookOrbit was not changed\./);
 });
 
 test('strays: delete all removes every highlight BookOrbit lacks and leaves the rest byte for byte', async () => {

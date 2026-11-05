@@ -1188,6 +1188,43 @@ CrossPoint.registerPlugin(async (container, api) => {
         ' synced to a CrossPoint sync server and ' + (strays.synced === 1 ? 'has' : 'have') + ' to be deleted on the reader itself.</p>' : '');
   }
 
+  // The reader only ever appends to /My Clippings.txt, so deleting a highlight leaves its entry there.
+  // After this plugin deletes highlights from the reader it removes the matching entries too. Only
+  // entries for this book whose text is no longer among the reader's highlights are dropped.
+  async function tidyClippings(bookPath, removedTexts, keptRecords) {
+    try {
+      const text = await readText('/My Clippings.txt');
+      if (!text) return '';
+      if (text.length > 200 * 1024) return ' My Clippings.txt was left as it is: it is too big to edit from here.';
+      let titles = [];
+      try { titles = await bookTitles(await bookBytes(bookPath), bookPath); } catch (e) { titles = [recentTitles[bookPath]].filter(Boolean); }
+      if (pulled && pulled.info && pulled.info.title) titles.push(pulled.info.title);
+      const parts = text.split(/(\r?\n==========\r?\n?)/); // block, separator, block, separator...
+      const out = [];
+      let dropped = 0;
+      for (let i = 0; i < parts.length; i += 2) {
+        const block = parts[i];
+        const sep = parts[i + 1] || '';
+        const entry = parseClippings(block)[0];
+        const drop = entry && titles.some((t) => sameTitle(entry.title, t)) &&
+          removedTexts.some((t) => sameHighlight(entry.text, t)) &&
+          !keptRecords.some((r) => sameHighlight(entry.text, r.text));
+        if (drop) dropped++; else out.push(block + sep);
+      }
+      if (!dropped) return '';
+      const configPath = await locateConfigPath();
+      const dir = configPath.slice(0, configPath.lastIndexOf('/'));
+      const b64text = (t) => toBase64(new TextEncoder().encode(t));
+      const saved = await api.writeFile(dir + '/backup-My Clippings.txt', b64text(text));
+      if (saved && saved.ok === false) return ' My Clippings.txt was left as it is: a backup copy could not be made.';
+      const written = await api.writeFile('/My Clippings.txt', b64text(out.join('')));
+      if (written && written.ok === false) return ' My Clippings.txt could not be updated.';
+      return ' Removed ' + dropped + ' matching ' + (dropped === 1 ? 'entry' : 'entries') + ' from My Clippings.txt.';
+    } catch (e) {
+      return ' My Clippings.txt could not be updated.';
+    }
+  }
+
   async function strayClick(ev) {
     const target = ev && ev.target;
     const act = target && target.getAttribute && target.getAttribute('data-act');
@@ -1205,16 +1242,18 @@ CrossPoint.registerPlugin(async (container, api) => {
       const wanted = new Map();
       chosen.forEach((c) => wanted.set(c.key, (wanted.get(c.key) || 0) + 1));
       const kept = [];
+      const gone = [];
       let removed = 0;
       for (const r of loaded.store.records) {
         const key = recordKey(r);
-        if (!r.synced && wanted.get(key) > 0) { wanted.set(key, wanted.get(key) - 1); removed++; } else kept.push(r);
+        if (!r.synced && wanted.get(key) > 0) { wanted.set(key, wanted.get(key) - 1); removed++; gone.push(r.text); } else kept.push(r);
       }
       if (!removed) {
         hlStatus('Those highlights are already gone from the reader.', false, false, true);
       } else {
         await writeStore(loaded, loaded.store.strings, kept);
-        hlStatus('Deleted ' + removed + ' highlight' + (removed === 1 ? '' : 's') + ' from the reader. BookOrbit was not changed.', false, true);
+        const tidy = await tidyClippings(strays.path, gone, kept);
+        hlStatus('Deleted ' + removed + ' highlight' + (removed === 1 ? '' : 's') + ' from the reader.' + tidy + ' BookOrbit was not changed.', false, true);
       }
       await findStrays();
     } catch (e) {
