@@ -13,7 +13,7 @@
   server, a short period. Session delivery to BookOrbit worked on both. The
   highlights features were tried on the X4 Pro with a few highlights in one
   book (sending, the position opening correctly in BookOrbit's web reader,
-  pulling, saving the text file and the recent-books list). Other models
+  pulling and the recent-books list). Other models
   (X4C and others) are untested. The original X4 has no clock chip and is not supported (see issue 2). Several details below were worked out by
   reading CrossPoint's source and have **not** been confirmed on hardware.
 - Not tested: other readers or firmware builds, Plugin Hub updates from an older
@@ -172,17 +172,18 @@ a button; it is not automatic, because plugin events cannot read files.
   other book.
 - **One way, and no clean-up.** Sending adds highlights to BookOrbit. Editing or
   deleting a highlight on the reader afterwards does not change BookOrbit, and
-  edits or deletions in BookOrbit do not change the reader. Pulling does not put
-  highlights into the reader's own highlight list; it only shows them and saves a
-  text file.
+  edits or deletions in BookOrbit do not change the reader. Pulling only shows
+  BookOrbit's highlights; **Add to reader** puts them on the reader.
 - **How pulling works.** BookOrbit's plugin login has no plain "list highlights"
   call, so pulling uses its device sync exchange: it presents the book as an empty
   copy and acknowledges each page of results. It keeps its own sync record per
   book copy on the server. Nothing odd has been seen, but long-term effects on
   BookOrbit's sync state have not been studied.
-- **Text file limit.** The reader accepts files up to about 250 KB from a plugin.
-  If a book has more highlights than fit, the first ones that fit are saved and the
-  box says how many.
+- **/My Clippings.txt limit.** The reader accepts files up to about 250 KB from a
+  plugin. If `/My Clippings.txt` is over about 200 KB the plugin leaves it as it is
+  and says so. The reader itself only appends to it when you highlight on the
+  device, so entries for highlights you delete on the reader stay until the plugin
+  next updates the file (Add to reader, or a delete from the plugin).
 - **Highlight times.** The time of a highlight comes from the reader's own clock,
   so a reader with a wrong clock (see issue 1) can show wrong times.
 - **Highlight limits on the reader.** CrossPoint itself caps the number of

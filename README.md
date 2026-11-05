@@ -33,8 +33,7 @@ Not affiliated with CrossPoint or BookOrbit.
   lost".
 - **Pull highlights.** Highlights that BookOrbit holds for a book, including ones
   made in its web reader or on another device, are listed on the settings page
-  and can be saved to the reader as a text file named
-  `BOOK NAME - AUTHOR Highlights.txt`, so you can read them on the device.
+  and can then be added to the reader.
 - **Add to reader.** After pulling, **Add to reader** puts those
   highlights into the reader's own highlights for the book, so highlights made in
   BookOrbit's web reader or on another device show up in the book on the device.
@@ -156,18 +155,18 @@ background.
    were found in the book, and whether any matched text that appears more than
    once.
 4. **Pull highlights.** Lists the highlights BookOrbit has for the book, sorted
-   by page, with chapter, page and notes. Press **Save as text file** to write
-   `BOOK NAME - AUTHOR Highlights.txt` into the same folder as the book. The name
-   comes from the EPUB's own title and author. Pulling does not change anything
-   in the reader's own highlights.
+   by page, with chapter, page and notes. Pulling does not change anything on
+   the reader.
 
 5. **Add to reader.** Available after a pull. Adds the pulled highlights to the
-   reader's own highlight file for the book. Anything on the reader that BookOrbit
+   reader's own highlight file for the book, and writes matching entries to
+   `/My Clippings.txt` in the reader's own format (creating it if it is
+   missing). Anything on the reader that BookOrbit
    does not have is then listed, so you can delete it from the reader: a button
    per highlight and **Delete all**, each needing a second press to confirm.
 
 The list on the page clears when you press any other button or choose another
-book; **Save as text file** and **Add to reader** keep it.
+book; **Add to reader** keeps it.
 
 **Colours of the result box:** green is success, orange means nothing was wrong
 but nothing was sent (for example everything is already in BookOrbit, or the

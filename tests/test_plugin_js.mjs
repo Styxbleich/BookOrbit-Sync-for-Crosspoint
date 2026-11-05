@@ -586,7 +586,7 @@ async function epubWithMeta(title, author) {
 const add = (id, page, chapter, text, note) => ({ serverId: id, version: 1, datetime: '2026-11-03 21:0' + id + ':00', drawer: 'lighten',
   color: 'yellow', text, note: note || null, chapter, posFormat: 'xpointer', pos0: '/body/DocFragment[1]/body/p[1]/text()[1].0', pos1: null, pageno: page });
 
-test('pull: pages through BookOrbit, acknowledges each page, lists and saves BOOKNAME - AUTHOR Highlights.txt', async () => {
+test('pull: pages through BookOrbit, acknowledges each page, lists them', async () => {
   const epub = await epubWithMeta('The Butcher’s Masquerade', 'Matt Dinniman');
   const pages = [
     { results: [{ hash: 'h', bookId: 1, toApply: { add: [add(2, 30, 'Chapter 7', 'Second <b>one</b> & more'), add(1, 27, 'Chapter 6', 'I’ve got “quotes”', 'my note')], edit: [], delete: [] }, more: true }], unmatched: [], positionIncompatible: [] },
@@ -610,35 +610,17 @@ test('pull: pages through BookOrbit, acknowledges each page, lists and saves BOO
   assert.ok(html.indexOf('quotes') < html.indexOf('Second'), 'sorted by page');
   assert.match(html, /Second &lt;b&gt;one&lt;\/b&gt; &amp; more/, 'text is escaped');
   assert.match(html, /Note: my note/);
-  assert.equal(els['bo-hl-save'].disabled, false);
-  await els['bo-hl-save'].onclick();
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].p, '/Books/Dinniman, Matt/The Butcher’s Masquerade - Matt Dinniman Highlights.txt');
-  assert.match(writes[0].text, /^The Butcher’s Masquerade\nMatt Dinniman\nHighlights from BookOrbit \(3\)\n\n== Chapter 6 ==\n\n\[p\. 27\] I’ve got “quotes”\nNote: my note\n\n== Chapter 7 ==\n\n\[p\. 30\] Second <b>one<\/b> & more\n\n\[p\. 31\] Third\n$/);
-  assert.match(els['bo-hl-status'].textContent, /^Saved 3 highlights to /);
+  assert.equal(els['bo-hl-add'].disabled, false);
+  assert.equal(writes.length, 0, 'pulling writes nothing to the reader');
 });
 
-test('pull: file name drops characters the SD card cannot hold, and falls back to the file name', async () => {
-  const epub = await epubWithMeta('Who: What? / Why*', 'A. "Author"');
-  const { els, writes } = await load({
-    existing: CONFIG, files: { '/b.epub': epub, '/plain.epub': Buffer.from('not a zip') },
-    relay: async () => ({ status: 201, body: JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 1, 'C', 'x')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] }) })
-  });
-  for (const [book, expected] of [['/b.epub', '/Who What Why - A. Author Highlights.txt'], ['/plain.epub', '/plain Highlights.txt']]) {
-    els['bo-book'].value = book;
-    await els['bo-hl-pull'].onclick();
-    await els['bo-hl-save'].onclick();
-    assert.equal(writes[writes.length - 1].p, expected);
-  }
-});
-
-test('pull: no highlights is orange, unknown or differing files are red, save needs a pull first', async () => {
+test('pull: no highlights is orange, unknown or differing files are red, add needs a pull first', async () => {
   const run = async (data) => {
     const { els, writes } = await load({ existing: CONFIG, files: { '/b.epub': Buffer.from('abc') },
       relay: async () => ({ status: 201, body: JSON.stringify(data) }) });
     els['bo-book'].value = '/b.epub';
     await els['bo-hl-pull'].onclick();
-    return { box: els['bo-hl-status'], saveDisabled: els['bo-hl-save'].disabled, writes };
+    return { box: els['bo-hl-status'], saveDisabled: els['bo-hl-add'].disabled, writes };
   };
   const none = await run({ results: [{ hash: 'h', bookId: 1, toApply: { add: [], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
   assert.match(none.box.textContent, /no highlights for this book yet/);
@@ -650,7 +632,7 @@ test('pull: no highlights is orange, unknown or differing files are red, save ne
   const differs = await run({ results: [], unmatched: [], positionIncompatible: ['h'] });
   assert.match(differs.box.textContent, /file differs from its copy/);
   const { els } = await load({ existing: CONFIG, relay: async () => ({ status: 200, body: '{}' }) });
-  await els['bo-hl-save'].onclick();
+  await els['bo-hl-add'].onclick();
   assert.match(els['bo-hl-status'].textContent, /Pull the highlights first/);
 });
 
@@ -718,7 +700,7 @@ test('check book lists the highlights the reader has for that book, ready to sen
   assert.equal(relays.filter((r) => r.u.endsWith('/annotations')).length, 0, 'checking sends nothing');
 });
 
-test('the pulled list stays for Save as text file, and every other button clears it', async () => {
+test('the pulled list is cleared by every other button', async () => {
   const pulledBody = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: [add(1, 5, 'C', 'pulled text')], edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
   for (const clearing of ['bo-hl-check', 'bo-hl-send', 'bo-hl-pull']) {
     const { els, writes } = await load({
@@ -730,12 +712,9 @@ test('the pulled list stays for Save as text file, and every other button clears
     els['bo-book'].value = '/b.epub';
     await els['bo-hl-pull'].onclick();
     assert.match(els['bo-hl-list'].innerHTML, /pulled text/);
-    await els['bo-hl-save'].onclick();
-    assert.match(els['bo-hl-list'].innerHTML, /pulled text/, 'saving keeps the list');
-    assert.equal(writes.length, 1);
     await els[clearing].onclick();
     if (clearing !== 'bo-hl-pull') assert.doesNotMatch(els['bo-hl-list'].innerHTML, /pulled text/, clearing + ' clears the old list');
-    if (clearing !== 'bo-hl-pull') assert.equal(els['bo-hl-save'].disabled, true);
+    if (clearing !== 'bo-hl-pull') assert.equal(els['bo-hl-add'].disabled, true);
   }
 });
 
@@ -750,7 +729,7 @@ test('choosing another book in the dropdown clears the list', async () => {
   els['bo-recent'].value = '/b.epub';
   els['bo-recent'].onchange();
   assert.equal(els['bo-hl-list'].innerHTML, '');
-  assert.equal(els['bo-hl-save'].disabled, true);
+  assert.equal(els['bo-hl-add'].disabled, true);
 });
 
 // ---- Adding pulled highlights to the reader's own highlight file ----------------------------------
@@ -802,10 +781,11 @@ const STORE_PATH = '/.crosspoint/clippings/epub_2361001545.bin';
 const entry = (id, chapter, text, pos0, pos1) => ({ serverId: id, version: 1, datetime: '2026-11-03 21:0' + id + ':00',
   drawer: 'lighten', color: 'yellow', text, note: null, chapter, posFormat: 'xpointer', pos0: pos0 || null, pos1: pos1 || null, pageno: 1 });
 
-async function addToReader({ chapters = CHAPTERS, entries, store }) {
+async function addToReader({ chapters = CHAPTERS, entries, store, extra = {} }) {
   const epub = await makeEpub(chapters);
   const files = { [BOOK_PATH]: epub, '/.crosspoint/recent.json': rec(BOOK_PATH, 'Book') };
   if (store) files[STORE_PATH] = store;
+  Object.assign(files, extra);
   const body = JSON.stringify({ results: [{ hash: 'h', bookId: 1, toApply: { add: entries, edit: [], delete: [] }, more: false }], unmatched: [], positionIncompatible: [] });
   const loaded = await load({ existing: CONFIG, files, relay: async () => ({ status: 201, body }) });
   loaded.els['bo-book'].value = BOOK_PATH;
@@ -814,6 +794,41 @@ async function addToReader({ chapters = CHAPTERS, entries, store }) {
   const written = loaded.writes.filter((w) => w.p === STORE_PATH);
   return { ...loaded, status: loaded.els['bo-hl-status'].textContent, written };
 }
+
+const CLIP_PATH = '/My Clippings.txt';
+const clipFor = (when, chapter, text) => 'Book ()\n- Your Highlight on Page 1 | ' + chapter + ' | Added on ' + when + '\n\n' + text + '\n==========\n';
+
+test('add to reader: /My Clippings.txt is created in the reader\'s own format when it is missing', async () => {
+  const { writes, status } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const clip = writes.find((w) => w.p === CLIP_PATH);
+  assert.equal(clip.bin.toString('utf8'), clipFor('Tuesday, November 3, 2026, 09:01 PM', 'Chapter Two', 'Then more text.'));
+  assert.match(status, /\/My Clippings\.txt: added 1 entry\./);
+  assert.ok(!writes.some((w) => w.p === '/plugins/bookorbit-sync/backup-My Clippings.txt'), 'nothing to back up');
+});
+
+test('add to reader: other books\' entries are kept, stale ones for this book are removed, new ones are appended', async () => {
+  const other = 'Other (B)\n- Your Highlight on Page 2 | C | Added on Monday, January 1, 2024, 10:00 AM\n\nOther book text\n==========\n';
+  const stale = clipFor('Monday, January 1, 2024, 10:00 AM', 'Chapter One', 'Deleted on the reader long ago, so it is stale.');
+  const { writes, status } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')], extra: { [CLIP_PATH]: other + stale } });
+  const clip = writes.find((w) => w.p === CLIP_PATH);
+  assert.equal(clip.bin.toString('utf8'), other + clipFor('Tuesday, November 3, 2026, 09:01 PM', 'Chapter Two', 'Then more text.'));
+  assert.equal(writes.find((w) => w.p === '/plugins/bookorbit-sync/backup-My Clippings.txt').bin.toString('utf8'), other + stale);
+  assert.match(status, /\/My Clippings\.txt: added 1 entry, removed 1 entry\./);
+});
+
+test('add to reader: pressing it again, or a highlight already in the file, adds no duplicate entry', async () => {
+  const first = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const clipText = first.writes.find((w) => w.p === CLIP_PATH).bin.toString('utf8');
+  const again = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')], store: first.written[0].bin, extra: { [CLIP_PATH]: clipText } });
+  assert.equal(again.writes.filter((w) => w.p === CLIP_PATH).length, 0);
+});
+
+test('add to reader: nothing new for the reader still creates the missing /My Clippings.txt', async () => {
+  const first = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
+  const again = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')], store: first.written[0].bin });
+  assert.match(again.status, /^Nothing new to add to the reader\. \/My Clippings\.txt: added 1 entry\./);
+  assert.ok(again.writes.some((w) => w.p === CLIP_PATH));
+});
 
 test('add to reader: the file name is the reader\'s own hash of the book path', async () => {
   const { written } = await addToReader({ entries: [entry(1, 'Chapter Two', 'Then more text.')] });
@@ -951,12 +966,15 @@ test('add to reader: the button stays greyed out until highlights have been pull
     relay: async (m, u) => ({ status: 200, body: u.endsWith('/match-check') ? JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }] }) : body }) });
   els['bo-book'].value = BOOK_PATH;
   assert.equal(els['bo-hl-add'].disabled, true, 'greyed out at the start');
+  assert.equal(els['bo-hl-actions'].style.display, 'none', 'hidden at the start');
   await els['bo-hl-check'].onclick();
   assert.equal(els['bo-hl-add'].disabled, true, 'Check book does not enable it');
   await els['bo-hl-pull'].onclick();
   assert.equal(els['bo-hl-add'].disabled, false, 'enabled after a pull that found highlights');
+  assert.equal(els['bo-hl-actions'].style.display, '', 'shown after a pull that found highlights');
   await els['bo-hl-check'].onclick();
   assert.equal(els['bo-hl-add'].disabled, true, 'greyed out again when another button clears the list');
+  assert.equal(els['bo-hl-actions'].style.display, 'none', 'hidden again when another button clears the list');
 });
 
 test('check book: no highlights on the reader still confirms the book and says there are none', async () => {
@@ -1056,7 +1074,7 @@ test('strays: deleting also removes that book\'s matching entries from My Clippi
   assert.equal(out.bin.toString('utf8'), clipEntry('Book', A_TEXT) + clipEntry('Other Book', B_TEXT) + clipEntry('Book', C_TEXT));
   const backup = writes.find((w) => w.p === '/plugins/bookorbit-sync/backup-My Clippings.txt');
   assert.equal(backup.bin.toString('utf8'), clips);
-  assert.match(els['bo-hl-status'].textContent, /Removed 1 matching entry from My Clippings\.txt\./);
+  assert.match(els['bo-hl-status'].textContent, /My Clippings\.txt: removed 1 entry\./);
 });
 
 test('strays: My Clippings.txt is left alone when nothing in it matches or it does not exist', async () => {
@@ -1138,6 +1156,22 @@ test('send: highlights deleted on the reader are not sent to BookOrbit again', a
   await again.els['bo-hl-send'].onclick();
   assert.match(again.els['bo-hl-status'].textContent, /^The 2 highlights for this book in \/My Clippings\.txt were deleted from the reader, so nothing was sent\./);
   assert.equal(again.relays.filter((r) => r.u.endsWith('/annotations')).length, 0);
+});
+
+test('check and send: highlights only in the reader\'s own file (no /My Clippings.txt) are still found', async () => {
+  const store = encodeStore({ title: 'Dune', author: '', path: BOOK_PATH }, [strayRecord('Added by the plugin, only in the reader file.')]);
+  const files = { [BOOK_PATH]: Buffer.from('abc'), '/.crosspoint/recent.json': rec(BOOK_PATH, 'Dune'), [STORE_PATH]: store };
+  const found = async () => ({ status: 200, body: JSON.stringify({ matches: [{ hash: 'h', bookId: 1, bookFileId: 2 }] }) });
+  const a = await load({ existing: CONFIG, files, relay: found });
+  a.els['bo-book'].value = BOOK_PATH;
+  await a.els['bo-hl-check'].onclick();
+  assert.match(a.els['bo-hl-status'].textContent, /Highlights can sync\./);
+  assert.ok(a.els['bo-hl-list'].innerHTML.includes('Added by the plugin, only in the reader file.'));
+  const sent = [];
+  const b = await load({ existing: CONFIG, files, relay: async (m, u, h, body) => { sent.push(body); return { status: 201, body: JSON.stringify({ results: [{ upserted: 1 }] }) }; } });
+  b.els['bo-book'].value = BOOK_PATH;
+  await b.els['bo-hl-send'].onclick();
+  assert.ok(sent.some((x) => String(x).includes('Added by the plugin, only in the reader file.')), 'the highlight is sent');
 });
 
 test('send: with no highlight file on the reader, /My Clippings.txt is used as before', async () => {
